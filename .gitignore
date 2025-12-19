@@ -1,0 +1,17 @@
+# model & checkpoint
+outputs/**/checkpoint*.pt
+outputs/**/pytorch_model.bin
+outputs/**/model.safetensors
+
+# training artifacts besar
+outputs/run_*/
+
+# cache & temp
+__pycache__/
+*.log
+
+# environment
+.env
+
+venv/*
+backup/*

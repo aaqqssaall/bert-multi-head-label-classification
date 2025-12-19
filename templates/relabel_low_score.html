@@ -1,0 +1,643 @@
+{% extends "layout.html" %}
+{% block content %}
+
+<section class="card">
+  <h2>Relabel Low Score Data</h2>
+
+  {% if message %}
+    <p class="small flash-success">{{ message }}</p>
+  {% endif %}
+
+  <p class="small">
+    Subset isi <code>low_score.jsonl</code> yang perlu diperiksa dan direlabel.
+    Anda dapat menggunakan rekomendasi LLM sebagai saran label, lalu menyimpan per baris atau batch.
+  </p>
+
+  {# ---------------- Filter bar ---------------- #}
+  <form method="get" action="/relabel_low_score" class="filter-bar">
+    <div class="filter-group">
+      <label class="filter-label">
+        <span>Show</span>
+        <select name="show">
+          <option value="5"  {% if show == 5 %}selected{% endif %}>5</option>
+          <option value="10"  {% if show == 10 %}selected{% endif %}>10</option>
+          <option value="20"  {% if show == 20 %}selected{% endif %}>20</option>
+          <option value="50"  {% if show == 50 %}selected{% endif %}>50</option>
+          <option value="100" {% if show == 100 %}selected{% endif %}>100</option>
+          <option value="200" {% if show == 200 %}selected{% endif %}>200</option>
+        </select>
+      </label>
+
+      <label class="filter-label">
+        <span>Order by</span>
+        <select name="order_by">
+          <option value="created_at" {% if order_by == "created_at" %}selected{% endif %}>Created time</option>
+          <option value="confidence" {% if order_by == "confidence" %}selected{% endif %}>Confidence</option>
+          <option value="label"      {% if order_by == "label" %}selected{% endif %}>Label quality</option>
+        </select>
+      </label>
+
+      <label class="filter-label">
+        <span>Direction</span>
+        <select name="order_dir">
+          <option value="desc" {% if order_dir == "desc" %}selected{% endif %}>Desc</option>
+          <option value="asc"  {% if order_dir == "asc" %}selected{% endif %}>Asc</option>
+        </select>
+      </label>
+
+      <label class="filter-label">
+        <span>Label quality</span>
+        <select name="label_quality">
+          <option value=""      {% if not filter_label_quality %}selected{% endif %}>All</option>
+          <option value="high"  {% if filter_label_quality == "high" %}selected{% endif %}>high</option>
+          <option value="medium"{% if filter_label_quality == "medium" %}selected{% endif %}>medium</option>
+          <option value="low"   {% if filter_label_quality == "low" %}selected{% endif %}>low</option>
+        </select>
+      </label>
+
+      <label class="filter-label">
+        <span>Aspect</span>
+        <select name="aspect">
+          <option value="" {% if not filter_aspect %}selected{% endif %}>All</option>
+          {% for asp in aspect_labels %}
+          <option value="{{ asp }}" {% if filter_aspect == asp %}selected{% endif %}>{{ asp }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label class="filter-label">
+        <span>Comment type</span>
+        <select name="comment_type">
+          <option value="" {% if not filter_comment_type %}selected{% endif %}>All</option>
+          {% for ct in comment_type_labels %}
+          <option value="{{ ct }}" {% if filter_comment_type == ct %}selected{% endif %}>{{ ct }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+
+    <button type="submit" class="btn-primary filter-apply-btn">Apply</button>
+  </form>
+
+  {# ---------------- Batch LLM bar ---------------- #}
+  <div class="batch-bar">
+    <div class="batch-buttons">
+      <button type="button" class="btn-secondary" id="btn-llm-generate-visible">
+        Generate LLM recommendation (visible)
+      </button>
+      <button type="button" class="btn-secondary" id="btn-llm-apply-visible">
+        Apply LLM recommendation (visible)
+      </button>
+    </div>
+    <span class="small" id="llm-status-message"></span>
+  </div>
+
+  {# ---------------- Tabel utama ---------------- #}
+  <form action="/relabel_low_score_submit" method="post">
+    <div class="table-wrapper">
+      <table class="data-table relabel-table">
+        <thead>
+          <tr>
+            <th style="width: 40px;">
+    <input type="checkbox" id="select-all-rows">
+  </th>
+            <th style="width: 150px;">Meta</th>
+            <th style="width: 115px;">Current aspects</th>
+            <th style="width: 115px;">Current comment types</th>
+            <th style="width: 115px;">LLM aspects</th>
+            <th style="width: 115px;">LLM comment types</th>
+            <th style="width: 230px;">LLM reason</th>
+            <th style="width: 230px;">Review text</th>
+            <th style="width: 180px;">New aspects</th>
+            <th style="width: 170px;">New comment types</th>
+            <th style="width: 115px;">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for rec in records %}
+          {% set llm = llm_map.get(rec.id) if llm_map is defined else None %}
+          <tr data-rec-id="{{ rec.id }}">
+
+            <td class="select-cell">
+    <input
+      type="checkbox"
+      class="row-select"
+      name="selected_ids"
+      value="{{ rec.id }}"
+    >
+  </td>
+            <td class="meta-cell">
+              <div class="meta-block">
+                <div><strong>ID:</strong> <code>{{ rec.id }}</code></div>
+                <div><strong>Created:</strong> {{ rec.created_at or "-" }}</div>
+                <div><strong>Label:</strong> {{ rec.label_quality or "-" }}</div>
+                <div>
+                  <strong>Confidence:</strong>
+                  {% if rec.overall_conf is not none %}
+                    {{ "%.3f"|format(rec.overall_conf) }}
+                  {% else %}
+                    -
+                  {% endif %}
+                </div>
+              </div>
+              <input type="hidden" name="rec_id" value="{{ rec.id }}">
+            </td>
+
+            <td class="current-aspects-cell">
+              {% if rec.current_aspects %}
+                <ul class="label-list">
+                  {% for asp in rec.current_aspects %}
+                    <li>{{ asp }}</li>
+                  {% endfor %}
+                </ul>
+              {% else %}
+                <span class="small">–</span>
+              {% endif %}
+            </td>
+
+            <td class="current-comment-types-cell">
+              {% if rec.current_comment_types %}
+                <ul class="label-list">
+                  {% for ct in rec.current_comment_types %}
+                    <li>{{ ct }}</li>
+                  {% endfor %}
+                </ul>
+              {% else %}
+                <span class="small">–</span>
+              {% endif %}
+            </td>
+
+            <td class="llm-aspects-cell">
+              {% if llm and llm.aspects %}
+                <ul class="label-list">
+                  {% for asp in llm.aspects %}
+                    <li>{{ asp }}</li>
+                  {% endfor %}
+                </ul>
+              {% else %}
+                <span class="small">No LLM</span>
+              {% endif %}
+            </td>
+
+            <td class="llm-comment-types-cell">
+              {% if llm and llm.comment_types %}
+                <ul class="label-list">
+                  {% for ct in llm.comment_types %}
+                    <li>{{ ct }}</li>
+                  {% endfor %}
+                </ul>
+              {% else %}
+                <span class="small">No LLM</span>
+              {% endif %}
+            </td>
+
+            <td class="llm-reason-cell">
+              {% if llm and llm.reason %}
+                <div class="llm-reason-box">{{ llm.reason }}</div>
+              {% else %}
+                <span class="small">–</span>
+              {% endif %}
+            </td>
+
+                        <td>
+              <div class="review-text">{{ (rec.text or rec.text_normalized) | trim }}</div>
+            </td>
+
+            <td>
+              <div class="checkbox-column">
+                {% for asp in aspect_labels %}
+                  <label class="checkbox-inline">
+                    <input
+                      type="checkbox"
+                      name="aspects_{{ rec.id }}"
+                      value="{{ asp }}"
+                      {% if asp in rec.current_aspects %}checked{% endif %}
+                    >
+                    {{ asp }}
+                  </label>
+                {% endfor %}
+              </div>
+            </td>
+
+            <td>
+              <div class="checkbox-column">
+                {% for ct in comment_type_labels %}
+                  <label class="checkbox-inline">
+                    <input
+                      type="checkbox"
+                      name="comment_types_{{ rec.id }}"
+                      value="{{ ct }}"
+                      {% if ct in rec.current_comment_types %}checked{% endif %}
+                    >
+                    {{ ct }}
+                  </label>
+                {% endfor %}
+              </div>
+            </td>
+
+
+
+            <td class="action-column">
+              <div class="row-loading-indicator small">Loading...</div>
+              <button
+                type="button"
+                class="btn-sm btn-secondary row-save-btn"
+                data-id="{{ rec.id }}"
+              >
+                Save row
+              </button>
+              <button
+                type="button"
+                class="btn-sm btn-secondary row-llm-apply-btn"
+                data-id="{{ rec.id }}"
+              >
+                Apply LLM
+              </button>
+              <button
+                type="button"
+                class="btn-sm btn-outline row-llm-refresh-btn"
+                data-id="{{ rec.id }}"
+              >
+                Refresh LLM
+              </button>
+              <button
+                type="button"
+                class="btn-sm btn-danger row-delete-btn"
+                data-id="{{ rec.id }}"
+              >
+                Delete
+              </button>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div style="margin-top: 16px;">
+      <button type="submit" class="btn-primary">
+        Save Relabel &amp; Move to additional_data
+      </button>
+    </div>
+  </form>
+</section>
+
+<div id="toast" class="toast"></div>
+
+<script>
+  function showToast(message, kind) {
+    const toastEl = document.getElementById("toast");
+    if (!toastEl) return;
+
+    toastEl.textContent = message;
+    let cls = "toast toast-show";
+    if (kind === "warning") cls += " toast-warning";
+    toastEl.className = cls;
+
+    // tampil 5 detik
+    setTimeout(() => {
+      toastEl.className = "toast";
+    }, 5000);
+  }
+
+  function getVisibleRowIds() {
+    const rows = document.querySelectorAll("tr[data-rec-id]");
+    const ids = [];
+    rows.forEach(r => {
+      const id = r.getAttribute("data-rec-id");
+      if (id) ids.push(id);
+    });
+    return ids;
+  }
+
+  function renderLabelListCell(cell, labels) {
+    if (!cell) return;
+    if (!labels || !labels.length) {
+      cell.innerHTML = '<span class="small">–</span>';
+      return;
+    }
+    const ul = document.createElement("ul");
+    ul.className = "label-list";
+    labels.forEach(l => {
+      const li = document.createElement("li");
+      li.textContent = l;
+      ul.appendChild(li);
+    });
+    cell.innerHTML = "";
+    cell.appendChild(ul);
+  }
+
+  function updateRowFromRecord(rec) {
+    const id = rec.id;
+    if (!id) return;
+    const row = document.querySelector('tr[data-rec-id="' + id + '"]');
+    if (!row) return;
+
+    const aspects = rec.aspects || [];
+    const cts = rec.comment_types || [];
+
+    const currentAspCell = row.querySelector(".current-aspects-cell");
+    const currentCtCell = row.querySelector(".current-comment-types-cell");
+    renderLabelListCell(currentAspCell, aspects);
+    renderLabelListCell(currentCtCell, cts);
+
+    const aspCheckboxes = row.querySelectorAll('input[name="aspects_' + id + '"]');
+    aspCheckboxes.forEach(cb => {
+      cb.checked = aspects.includes(cb.value);
+    });
+    const ctCheckboxes = row.querySelectorAll('input[name="comment_types_' + id + '"]');
+    ctCheckboxes.forEach(cb => {
+      cb.checked = cts.includes(cb.value);
+    });
+  }
+
+  function updateRowLLM(entry) {
+    const id = entry.id;
+    if (!id) return;
+    const row = document.querySelector('tr[data-rec-id="' + id + '"]');
+    if (!row) return;
+
+    const aspCell = row.querySelector(".llm-aspects-cell");
+    const ctCell = row.querySelector(".llm-comment-types-cell");
+    const reasonCell = row.querySelector(".llm-reason-cell");
+
+    renderLabelListCell(aspCell, entry.aspects || []);
+    renderLabelListCell(ctCell, entry.comment_types || []);
+
+    if (reasonCell) {
+      if (entry.reason) {
+        reasonCell.innerHTML = '<div class="llm-reason-box"></div>';
+        reasonCell.querySelector(".llm-reason-box").textContent = entry.reason;
+      } else {
+        reasonCell.innerHTML = '<span class="small">–</span>';
+      }
+    }
+  }
+
+  function setRowLoading(id, isLoading) {
+    const row = document.querySelector('tr[data-rec-id="' + id + '"]');
+    if (!row) return;
+    const indicator = row.querySelector(".row-loading-indicator");
+    const buttons = row.querySelectorAll(".action-column button");
+
+    if (isLoading) {
+      row.classList.add("row-loading");
+      if (indicator) indicator.style.display = "block";
+      buttons.forEach(b => b.disabled = true);
+    } else {
+      row.classList.remove("row-loading");
+      if (indicator) indicator.style.display = "none";
+      buttons.forEach(b => b.disabled = false);
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    const statusEl = document.getElementById("llm-status-message");
+    const btnGenerateVisible = document.getElementById("btn-llm-generate-visible");
+    const btnApplyVisible = document.getElementById("btn-llm-apply-visible");
+
+    if (btnGenerateVisible) {
+      btnGenerateVisible.addEventListener("click", async function () {
+        const ids = getVisibleRowIds();
+        if (!ids.length) {
+          showToast("Tidak ada row yang terlihat.", "warning");
+          return;
+        }
+        if (!window.confirm("Generate LLM recommendation untuk " + ids.length + " row yang ditampilkan?")) {
+          return;
+        }
+        statusEl.textContent = "Generating LLM recommendation...";
+        try {
+          const resp = await fetch("/api/relabel/llm_batch_generate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids }),
+          });
+          const data = await resp.json();
+          if (!resp.ok || data.status !== "ok") {
+            statusEl.textContent = data.error || "Gagal generate rekomendasi LLM.";
+            showToast(data.error || "Gemini error / limit tercapai.", "warning");
+            return;
+          }
+          const results = data.results || [];
+          results.forEach(updateRowLLM);
+          statusEl.textContent =
+            "LLM recommendation diproses: " + data.processed +
+            " sukses, " + data.skipped_not_found + " not found, " +
+            data.skipped_empty_text + " tanpa teks.";
+          showToast("LLM recommendation updated.", null);
+        } catch (e) {
+          console.error(e);
+          statusEl.textContent = "Terjadi error saat menghubungi API LLM.";
+          showToast("Error koneksi LLM.", "warning");
+        }
+      });
+    }
+
+    if (btnApplyVisible) {
+      btnApplyVisible.addEventListener("click", async function () {
+        const ids = getVisibleRowIds();
+        if (!ids.length) {
+          showToast("Tidak ada row yang terlihat.", "warning");
+          return;
+        }
+        if (!window.confirm(
+          "Apply LLM recommendation ke semua row yang saat ini ditampilkan " +
+          "(hanya untuk yang sudah punya rekomendasi)?"
+        )) {
+          return;
+        }
+        statusEl.textContent = "Applying LLM recommendation (batch)...";
+        try {
+          const resp = await fetch("/api/relabel/llm_batch_apply", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids }),
+          });
+          const data = await resp.json();
+          if (!resp.ok || data.status !== "ok") {
+            statusEl.textContent = data.error || "Gagal apply batch LLM.";
+            showToast(data.error || "Gagal apply batch LLM.", "warning");
+            return;
+          }
+          statusEl.textContent =
+            "Apply selesai: " + data.applied + " row, " +
+            data.skipped_no_llm + " tanpa rekomendasi LLM.";
+          showToast("Batch apply LLM selesai. Refresh halaman untuk melihat label terbaru.", null);
+          window.location.reload();
+        } catch (e) {
+          console.error(e);
+          statusEl.textContent = "Terjadi error saat apply batch LLM.";
+          showToast("Error batch apply.", "warning");
+        }
+      });
+    }
+
+    document.querySelectorAll(".row-llm-refresh-btn").forEach(function (btn) {
+      btn.addEventListener("click", async function () {
+        const id = btn.getAttribute("data-id");
+        if (!id) return;
+        setRowLoading(id, true);
+        try {
+          const resp = await fetch("/api/relabel/llm_refresh", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id }),
+          });
+          const data = await resp.json();
+          if (!resp.ok || data.status !== "ok") {
+            showToast(data.error || "Gagal refresh LLM.", "warning");
+            return;
+          }
+          updateRowLLM(data.suggestion);
+          showToast("LLM recommendation di-refresh.", null);
+        } catch (e) {
+          console.error(e);
+          showToast("Error saat refresh LLM.", "warning");
+        } finally {
+          setRowLoading(id, false);
+        }
+      });
+    });
+
+    document.querySelectorAll(".row-llm-apply-btn").forEach(function (btn) {
+      btn.addEventListener("click", async function () {
+        const id = btn.getAttribute("data-id");
+        if (!id) return;
+        setRowLoading(id, true);
+        try {
+          const resp = await fetch("/api/relabel/llm_apply_row", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id }),
+          });
+          const data = await resp.json();
+          if (!resp.ok || data.status !== "ok") {
+            showToast(data.error || "Gagal apply LLM.", "warning");
+            return;
+          }
+          const rec = data.record;
+          if (rec) updateRowFromRecord(rec);
+          if (data.llm) updateRowLLM(data.llm);
+          showToast("Label diambil dari LLM dan disimpan.", null);
+        } catch (e) {
+          console.error(e);
+          showToast("Error saat apply LLM.", "warning");
+        } finally {
+          setRowLoading(id, false);
+        }
+      });
+    });
+
+        document.querySelectorAll(".row-save-btn").forEach(function (btn) {
+      btn.addEventListener("click", async function () {
+        const id = btn.getAttribute("data-id");
+        if (!id) return;
+
+        const row = btn.closest("tr");
+        if (!row) return;
+
+        // Kumpulkan label dari checkbox di baris ini
+        const aspCbs = row.querySelectorAll('input[name="aspects_' + id + '"]:checked');
+        const ctCbs = row.querySelectorAll('input[name="comment_types_' + id + '"]:checked');
+
+        const aspects = Array.from(aspCbs).map(cb => cb.value);
+        const comment_types = Array.from(ctCbs).map(cb => cb.value);
+
+        if (!aspects.length && !comment_types.length) {
+          if (!window.confirm("Baris ini tidak memiliki aspek maupun comment type terpilih. Tetap pindahkan ke additional_data?")) {
+            return;
+          }
+        }
+
+        setRowLoading(id, true);
+
+        try {
+          const resp = await fetch("/api/relabel/row_save", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              id,
+              aspects,
+              comment_types,
+              source: "manual_form",
+            }),
+          });
+
+          const data = await resp.json();
+
+          if (!resp.ok || data.status !== "ok") {
+            showToast(data.error || "Gagal menyimpan & memindah row.", "warning");
+            return;
+          }
+
+          // Setelah dipindah ke additional_data, hapus row dari tabel
+          const tr = btn.closest("tr");
+          if (tr) {
+            tr.remove();
+          }
+
+          // Jika semua row hilang, hilangkan juga centang 'select all'
+          const selectAll = document.getElementById("select-all-rows");
+          if (selectAll) {
+            const anyRowsLeft = document.querySelector('tr[data-rec-id]');
+            if (!anyRowsLeft) {
+              selectAll.checked = false;
+            }
+          }
+
+          showToast("Row disimpan dan dipindah ke additional_data.", null);
+        } catch (e) {
+          console.error(e);
+          showToast("Error saat menyimpan & memindah row.", "warning");
+        } finally {
+          setRowLoading(id, false);
+        }
+      });
+    });
+
+    document.querySelectorAll(".row-delete-btn").forEach(function (btn) {
+      btn.addEventListener("click", async function () {
+        const id = btn.getAttribute("data-id");
+        if (!id) return;
+        if (!window.confirm("Hapus review ini (dipindah ke deleted_review.jsonl)?")) {
+          return;
+        }
+        setRowLoading(id, true);
+        try {
+          const resp = await fetch("/api/relabel/row_delete", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id }),
+          });
+          const data = await resp.json();
+          if (!resp.ok || data.status !== "ok") {
+            showToast(data.error || "Gagal menghapus review.", "warning");
+            return;
+          }
+          const row = btn.closest("tr");
+          if (row) row.remove();
+          showToast("Review dipindah ke deleted_review.jsonl dan dihapus dari low_score.", "warning");
+        } catch (e) {
+          console.error(e);
+          showToast("Terjadi error saat delete review.", "warning");
+        } finally {
+          setRowLoading(id, false);
+        }
+      });
+    });
+  });
+      // Select all / clear all untuk checkbox row
+    const selectAll = document.getElementById("select-all-rows");
+    if (selectAll) {
+      selectAll.addEventListener("change", function () {
+        const checked = selectAll.checked;
+        document.querySelectorAll(".row-select").forEach(function (cb) {
+          cb.checked = checked;
+        });
+      });
+    }
+
+</script>
+
+{% endblock %}

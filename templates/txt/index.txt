@@ -1,0 +1,1115 @@
+{% extends "layout.html" %}
+{% block content %}
+
+<section class="card">
+  <h2>Review Labelling &amp; Training Control Panel</h2>
+  <p class="small">
+    Upload CSV atau masukkan teks ulasan (satu per baris), lalu jalankan pipeline:
+    NLI zero-shot labelling → training IndoBERT (grid search + iterative training) →
+    routing base_train / additional_data / low_score.
+  </p>
+
+  <form id="pipeline-form">
+    <div class="form-grid">
+      <div class="form-section">
+        <h3>Input data</h3>
+
+        <label for="file">CSV file (opsional)</label>
+        <input type="file" id="file" name="file" accept=".csv,.txt" />
+        <p class="small">
+          Jika diisi, sistem akan mencari kolom <code>review</code>, <code>text</code>, atau <code>ulasan</code>,
+          jika tidak ada akan memakai kolom pertama.
+        </p>
+
+        <label for="text_input">Manual text input (opsional)</label>
+        <textarea id="text_input" name="text_input" rows="8" placeholder="Satu ulasan per baris..."></textarea>
+      </div>
+
+      <div class="form-section">
+        <h3>Pipeline</h3>
+        <p class="small">
+          Saat tombol <strong>Run pipeline</strong> diklik, sistem akan:
+        </p>
+        <ol class="small">
+          <li>Menggabungkan jumlah record latih dari <code>base_train.jsonl</code>, <code>additional_data.jsonl</code>, dan batch baru.</li>
+          <li>Jika total &lt; {{ min_train_records_default }}, job dibatalkan sebelum NLI.</li>
+          <li>Jika total ≥ {{ min_train_records_default }}, pipeline penuh dijalankan:
+            NLI labelling → training IndoBERT (grid search) → routing data.
+          </li>
+        </ol>
+        <p class="small">
+          Threshold confidence model IndoBERT untuk masuk <code>base_train</code> dikunci pada
+          nilai default <code>{{ "%.2f"|format(confidence_threshold_default) }}</code>.
+        </p>
+
+        <button type="submit" class="btn-primary">Run pipeline</button>
+      </div>
+    </div>
+  </form>
+</section>
+
+<section class="card" id="job-section" style="display:none;">
+  <h3>Job status</h3>
+  <p>
+    Job ID:
+    <code id="job-id"></code>
+    <span id="job-status" class="status-badge status-pending">pending</span>
+  </p>
+
+  <div id="job-summary" class="job-summary">
+    <!-- summary akan diisi via JS -->
+  </div>
+
+  <h4>Log</h4>
+  <div class="log-container">
+    <pre id="job-log" class="log-textarea"></pre>
+  </div>
+</section>
+
+<section class="card" id="training-history-section">
+  <h3>Training history</h3>
+  {% if training_history %}
+  <section class="card" id="training-history-section">
+    <h3>Training history</h3>
+
+    <div class="history-overview">
+      <h4>Training performance over time</h4>
+      <div class="history-overview-chart-wrapper">
+        <canvas id="training-overview-chart"></canvas>
+      </div>
+      <p class="small" id="training-overview-summary">
+        Grafik ini menampilkan performa model per run berdasarkan metric yang dipilih.
+      </p>
+    </div>
+
+    <div class="history-list">
+      {% for run in training_history %}
+      <div class="history-item">
+        <div class="history-header">
+          <div>
+            <div class="history-title">
+              Run {{ loop.revindex }} &mdash; {{ run.created_at }}
+            </div>
+            <div class="history-subtitle">
+              {{ run.run_dir }} &bull; total records: {{ run.total_records }}
+            </div>
+          </div>
+          <button
+            type="button"
+            class="history-toggle"
+            data-target="history-body-{{ loop.index }}"
+          >
+            Details
+          </button>
+        </div>
+
+        <div class="history-body" id="history-body-{{ loop.index }}" style="display:none;">
+          <table class="data-table">
+            <tbody>
+              <tr>
+                <th>Run dir</th>
+                <td><code>{{ run.run_dir }}</code></td>
+              </tr>
+              <tr>
+                <th>Created at</th>
+                <td>{{ run.created_at }}</td>
+              </tr>
+              <tr>
+                <th>Total records</th>
+                <td>{{ run.total_records }}</td>
+              </tr>
+              {% if run.best_hp_run_dir %}
+              <tr>
+                <th>Best HP run dir</th>
+                <td><code>{{ run.best_hp_run_dir }}</code></td>
+              </tr>
+              <tr>
+                <th>Best HP val score</th>
+                <td>{{ "%.4f"|format(run.best_hp_val_score or 0.0) }}</td>
+              </tr>
+              {% endif %}
+              {% if run.final_run_dir %}
+              <tr>
+                <th>Final run dir</th>
+                <td><code>{{ run.final_run_dir }}</code></td>
+              </tr>
+              {% endif %}
+              {% if run.grid_search_summary_path %}
+              <tr>
+                <th>Grid search summary</th>
+                <td><code>{{ run.grid_search_summary_path }}</code></td>
+              </tr>
+              {% endif %}
+              {% if run.iterative_training_summary_path %}
+              <tr>
+                <th>Iterative training summary</th>
+                <td><code>{{ run.iterative_training_summary_path }}</code></td>
+              </tr>
+              {% endif %}
+            </tbody>
+          </table>
+
+          <div
+            class="history-metrics"
+            data-metrics-run-dir="{{ run.best_hp_run_dir or run.final_run_dir or run.run_dir }}"
+            data-metrics-loaded="false"
+            data-metrics-idx="{{ loop.index }}"
+          >
+            <h4>Training metrics (test set, best run)</h4>
+            <p class="small" id="metrics-summary-{{ loop.index }}">
+              Metrics akan dimuat ketika bagian ini dibuka.
+            </p>
+
+            <div class="history-metrics-grid">
+              <div class="history-metrics-panel">
+                <h5>Aspect metrics per class (F1)</h5>
+                <canvas id="metrics-aspect-chart-{{ loop.index }}"></canvas>
+              </div>
+              <div class="history-metrics-panel">
+                <h5>Comment type metrics per class (F1)</h5>
+                <canvas id="metrics-type-chart-{{ loop.index }}"></canvas>
+              </div>
+            </div>
+
+            <div class="history-metrics-table-wrapper">
+              <h5>Detail per class (confusion-based)</h5>
+              <table class="data-table small-table" id="metrics-table-{{ loop.index }}">
+                <thead>
+                  <tr>
+                    <th>Label</th>
+                    <th>Accuracy</th>
+                    <th>Precision</th>
+                    <th>Recall</th>
+                    <th>F1</th>
+                    <th>Specificity</th>
+                    <th>Support (+)</th>
+                    <th>TN</th>
+                    <th>FP</th>
+                    <th>FN</th>
+                    <th>TP</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+
+            {# Panel baru: Data Test Prediction Result #}
+            <div class="history-testpred" id="testpred-container-{{ loop.index }}" data-testpred-loaded="false">
+              <h4>Data Test Prediction Result</h4>
+              <p class="small" id="testpred-summary-{{ loop.index }}">
+                Data test prediction akan dimuat ketika bagian ini dibuka.
+              </p>
+
+              <div class="testpred-controls">
+                <div class="testpred-control">
+                  <label for="testpred-filter-aspect-{{ loop.index }}">Filter aspect</label>
+                  <select id="testpred-filter-aspect-{{ loop.index }}">
+                    <option value="">All aspects</option>
+                  </select>
+                </div>
+                <div class="testpred-control">
+                  <label for="testpred-filter-type-{{ loop.index }}">Filter comment type</label>
+                  <select id="testpred-filter-type-{{ loop.index }}">
+                    <option value="">All types</option>
+                  </select>
+                </div>
+
+                <div class="testpred-control">
+                  <label for="testpred-show-{{ loop.index }}">Show</label>
+                  <select id="testpred-show-{{ loop.index }}">
+                    <option value="5">5</option>
+                    <option value="10" selected>10</option>
+                    <option value="20">20</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                    <option value="all">all</option>
+                  </select>
+                </div>
+                <div class="testpred-control">
+                  <label for="testpred-filter-text-{{ loop.index }}">Search text</label>
+                  <input type="text" id="testpred-filter-text-{{ loop.index }}" placeholder="Cari di text..." />
+                </div>
+                <div class="testpred-control">
+                  <label for="testpred-sort-by-{{ loop.index }}">Sort by</label>
+                  <select id="testpred-sort-by-{{ loop.index }}">
+                    <option value="row">Row</option>
+                    <option value="aspect_conf">Overall aspect confidence</option>
+                    <option value="type_conf">Overall comment_type confidence</option>
+                  </select>
+                </div>
+                <div class="testpred-control">
+                  <label for="testpred-sort-dir-{{ loop.index }}">Direction</label>
+                  <select id="testpred-sort-dir-{{ loop.index }}">
+                    <option value="asc">Asc</option>
+                    <option value="desc">Desc</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="history-metrics-table-wrapper">
+                <div class="table-wrapper">
+                  <table class="data-table small-table" id="testpred-table-{{ loop.index }}">
+                    <thead>
+                      <tr>
+                        <th>Row</th>
+                        <th>Text</th>
+                        <th>Aspect (gold)</th>
+                        <th>Pred aspect</th>
+                        <th>Comment type (gold)</th>
+                        <th>Pred comment type</th>
+                        <th>Overall aspect conf</th>
+                        <th>Overall type conf</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+            {# akhir panel Data Test Prediction Result #}
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="small">Belum ada riwayat training yang tercatat.</p>
+  {% endif %}
+</section>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+  const form = document.getElementById("pipeline-form");
+  const jobSection = document.getElementById("job-section");
+  const jobIdSpan = document.getElementById("job-id");
+  const jobStatusSpan = document.getElementById("job-status");
+  const jobLogPre = document.getElementById("job-log");
+  const jobSummaryDiv = document.getElementById("job-summary");
+
+  form.addEventListener("submit", async function (e) {
+    e.preventDefault();
+
+    const formData = new FormData(form);
+
+    jobSection.style.display = "block";
+    jobLogPre.textContent = "";
+    jobSummaryDiv.innerHTML =
+      "<p>Status: <strong>running</strong>. Pipeline sedang berjalan, ringkasan akan muncul di sini.</p>";
+    jobStatusSpan.textContent = "running";
+    jobStatusSpan.className = "status-badge status-running";
+
+    try {
+      const resp = await fetch("/run_pipeline", {
+        method: "POST",
+        body: formData,
+      });
+      const data = await resp.json();
+
+      if (!resp.ok || !data.job_id) {
+        jobStatusSpan.textContent = "error";
+        jobStatusSpan.className = "status-badge status-error";
+        jobSummaryDiv.innerHTML =
+          "<p><strong>Status:</strong> error</p><p class=\"job-error\">" +
+          (data.error || "Gagal memulai job pipeline.") +
+          "</p>";
+        return;
+      }
+
+      const jobId = data.job_id;
+      jobIdSpan.textContent = jobId;
+
+      function updateJobStatusClass(status) {
+        jobStatusSpan.textContent = status;
+        if (status === "running" || status === "started") {
+          jobStatusSpan.className = "status-badge status-running";
+        } else if (status === "finished") {
+          jobStatusSpan.className = "status-badge status-success";
+        } else if (status === "error") {
+          jobStatusSpan.className = "status-badge status-error";
+        } else {
+          jobStatusSpan.className = "status-badge status-pending";
+        }
+      }
+
+      async function pollStatus() {
+        try {
+          const resp = await fetch("/job_status/" + encodeURIComponent(jobId), {
+            headers: { "X-Requested-With": "XMLHttpRequest" },
+          });
+          const data = await resp.json();
+
+          const status = data.status || "unknown";
+          updateJobStatusClass(status);
+
+          if (Array.isArray(data.logs)) {
+            jobLogPre.textContent = data.logs.join("\n");
+          }
+
+          const result = data.result || null;
+          if (status === "finished" && result) {
+            let html = "";
+            if (result.error) {
+              html += "<p><strong>Status:</strong> error</p>";
+              html += '<p class="job-error">' + result.error + "</p>";
+            } else {
+              html += "<p><strong>Status:</strong> finished</p>";
+              html += "<table class=\"data-table small-table\"><tbody>";
+
+              const rows = [
+                ["Raw input records", result.raw_count],
+                ["Input JSONL", result.input_jsonl_path],
+                ["Labeled JSONL", result.labeled_jsonl_path],
+                ["Best HP run dir", result.best_hp_run_dir],
+                ["Final run dir", result.final_run_dir],
+                ["Routed to base_train", result.base_count],
+                ["Routed to additional_data", result.additional_count],
+                ["Routed to low_score", result.low_score_count],
+                ["Total training records", result.total_train_records],
+                ["Training skipped", String(result.training_skipped)],
+              ];
+
+              for (const [k, v] of rows) {
+                if (v === undefined || v === null) continue;
+                html += "<tr><th>" + k + "</th><td>" + v + "</td></tr>";
+              }
+
+              html += "</tbody></table>";
+            }
+            jobSummaryDiv.innerHTML = html;
+            return;
+          }
+
+          if (status === "error") {
+            let html = "<p><strong>Status:</strong> error</p>";
+            if (result && result.error) {
+              html += '<p class="job-error">' + result.error + "</p>";
+            } else {
+              html += '<p class="job-error">Job gagal tanpa pesan error spesifik.</p>';
+            }
+            html += '<p class="small">Lihat log di bawah untuk detail.</p>';
+            jobSummaryDiv.innerHTML = html;
+            return;
+          }
+
+          jobSummaryDiv.innerHTML =
+            "<p>Status: <strong>" +
+            status +
+            "</strong>. Pipeline sedang berjalan atau belum menghasilkan ringkasan. Lihat log untuk detail.</p>";
+
+          setTimeout(pollStatus, 2000);
+        } catch (err) {
+          console.error(err);
+          jobSummaryDiv.innerHTML =
+            "<p class=\"job-error\">Terjadi error saat mengambil status job. Coba beberapa saat lagi.</p>";
+          setTimeout(pollStatus, 4000);
+        }
+      }
+
+      pollStatus();
+    } catch (err) {
+      console.error(err);
+      jobStatusSpan.textContent = "error";
+      jobStatusSpan.className = "status-badge status-error";
+      jobSummaryDiv.innerHTML =
+        "<p><strong>Status:</strong> error</p><p class=\"job-error\">Terjadi error saat mengirim permintaan ke server.</p>";
+    }
+  });
+
+  const testPredDataByIdx = {};
+
+  function formatLabelProbsMultiline(probMap, preferLabels) {
+    if (!probMap) return "";
+    const entries = Object.entries(probMap);
+    if (preferLabels && preferLabels.length) {
+      const order = new Map(preferLabels.map((lab, i) => [lab, i]));
+      entries.sort((a, b) => {
+        const ia = order.has(a[0]) ? order.get(a[0]) : Number.MAX_SAFE_INTEGER;
+        const ib = order.has(b[0]) ? order.get(b[0]) : Number.MAX_SAFE_INTEGER;
+        return ia - ib;
+      });
+    } else {
+      entries.sort((a, b) => b[1] - a[1]);
+    }
+    return entries
+      .map(([lab, v]) => lab + ": " + Number(v).toFixed(3))
+      .join("\n");
+  }
+
+  
+function formatLabelList(labels, probs=null, emptyAsMisc=false) {
+  const labs = (labels && labels.length) ? labels : (emptyAsMisc ? ["misc"] : []);
+  if (!labs.length) {
+    const span = document.createElement("span");
+    span.className = "small";
+    span.textContent = "–";
+    return span;
+  }
+  const ul = document.createElement("ul");
+  ul.className = "label-list";
+  labs.forEach(lab => {
+    const li = document.createElement("li");
+    let txt = String(lab);
+    if (probs && Object.prototype.hasOwnProperty.call(probs, lab)) {
+      const v = probs[lab];
+      if (typeof v === "number" && isFinite(v)) {
+        txt = `${txt} (${v.toFixed(3)})`;
+      }
+    }
+    li.textContent = txt;
+    ul.appendChild(li);
+  });
+  return ul;
+}
+
+function renderTestPredTable(idx) {
+  const data = testPredDataByIdx[idx] || [];
+  const tableBody = document.querySelector("#testpred-table-" + idx + " tbody");
+  if (!tableBody) return;
+
+  const showSel = document.getElementById("testpred-show-" + idx);
+  const aspectSel = document.getElementById("testpred-filter-aspect-" + idx);
+  const typeSel = document.getElementById("testpred-filter-type-" + idx);
+  const textInput = document.getElementById("testpred-filter-text-" + idx);
+  const sortSel = document.getElementById("testpred-sort-by-" + idx);
+  const dirSel = document.getElementById("testpred-sort-dir-" + idx);
+
+  const showVal = showSel ? showSel.value : "10";
+  const aspectFilter = aspectSel ? aspectSel.value : "";
+  const typeFilter = typeSel ? typeSel.value : "";
+  const textFilter = (textInput ? textInput.value : "").toLowerCase();
+  const sortBy = sortSel ? sortSel.value : "row";
+  const dir = dirSel ? dirSel.value : "asc";
+  const dirFactor = dir === "desc" ? -1 : 1;
+
+  let rows = data.slice();
+
+  if (aspectFilter) {
+    rows = rows.filter(r => {
+      const gold = (r.aspect && r.aspect.length) ? r.aspect : ["misc"];
+      return gold.includes(aspectFilter);
+    });
+  }
+  if (typeFilter) {
+    rows = rows.filter(r => {
+      const goldT = r.comment_type || [];
+      return goldT.includes(typeFilter);
+    });
+  }
+  if (textFilter) {
+    rows = rows.filter(r => (r.text || "").toLowerCase().includes(textFilter));
+  }
+
+  rows.sort((a, b) => {
+    let va = 0;
+    let vb = 0;
+    if (sortBy === "row") {
+      va = a.row || 0;
+      vb = b.row || 0;
+    } else if (sortBy === "aspect_conf") {
+      va = a.overall_aspect_model_confidence != null ? a.overall_aspect_model_confidence : 0;
+      vb = b.overall_aspect_model_confidence != null ? b.overall_aspect_model_confidence : 0;
+    } else if (sortBy === "type_conf") {
+      va = a.overall_comment_type_model_confidence != null ? a.overall_comment_type_model_confidence : 0;
+      vb = b.overall_comment_type_model_confidence != null ? b.overall_comment_type_model_confidence : 0;
+    }
+    if (va < vb) return -1 * dirFactor;
+    if (va > vb) return 1 * dirFactor;
+    return 0;
+  });
+
+  const totalRows = rows.length;
+  const summaryEl = document.getElementById("testpred-summary-" + idx);
+  if (summaryEl) {
+    const totalAll = data.length;
+    summaryEl.textContent = `Total ${totalAll} baris data test. Menampilkan ${Math.min(totalRows, (showVal === "all" ? totalRows : Number(showVal) || totalRows))} baris (setelah filter: ${totalRows}).`;
+  }
+
+  if (showVal !== "all") {
+    const n = Number(showVal);
+    if (!Number.isNaN(n) && n > 0) {
+      rows = rows.slice(0, n);
+    }
+  }
+
+  tableBody.innerHTML = "";
+  rows.forEach(r => {
+    const tr = document.createElement("tr");
+
+    const tdRow = document.createElement("td");
+    tdRow.textContent = r.row != null ? String(r.row) : "";
+    tr.appendChild(tdRow);
+
+    const tdText = document.createElement("td");
+    tdText.className = "testpred-text-cell";
+    const textBox = document.createElement("div");
+    textBox.className = "review-text";
+    textBox.textContent = r.text || "";
+    tdText.appendChild(textBox);
+    tr.appendChild(tdText);
+
+    const tdAspectGold = document.createElement("td");
+    tdAspectGold.appendChild(formatLabelList(r.aspect || [], null, true));
+    tr.appendChild(tdAspectGold);
+
+    const tdAspectPred = document.createElement("td");
+    tdAspectPred.appendChild(formatLabelList(r.pred_aspect_labels || [], r.probs_aspects || null, (r.pred_aspect_labels || []).length === 0));
+    tr.appendChild(tdAspectPred);
+
+    const tdTypeGold = document.createElement("td");
+    tdTypeGold.appendChild(formatLabelList(r.comment_type || [], null, false));
+    tr.appendChild(tdTypeGold);
+
+    const tdTypePred = document.createElement("td");
+    tdTypePred.appendChild(formatLabelList(r.pred_comment_type_labels || [], r.probs_comment_types || null, (r.pred_comment_type_labels || []).length === 0));
+    tr.appendChild(tdTypePred);
+
+    const tdAspConf = document.createElement("td");
+    const aconf = r.overall_aspect_model_confidence;
+    tdAspConf.textContent = aconf == null ? "-" : Number(aconf).toFixed(3);
+    tr.appendChild(tdAspConf);
+
+    const tdTypeConf = document.createElement("td");
+    const tconf = r.overall_comment_type_model_confidence;
+    tdTypeConf.textContent = tconf == null ? "-" : Number(tconf).toFixed(3);
+    tr.appendChild(tdTypeConf);
+
+    tableBody.appendChild(tr);
+  });
+}
+
+  async function loadTestPredictions(runDir, idx) {
+    const container = document.getElementById("testpred-container-" + idx);
+    if (!container) return;
+
+    if (container.dataset.testpredLoaded === "true") {
+      return;
+    }
+
+    const summaryEl = document.getElementById("testpred-summary-" + idx);
+    const aspectSel = document.getElementById("testpred-filter-aspect-" + idx);
+    const typeSel = document.getElementById("testpred-filter-type-" + idx);
+    const textInput = document.getElementById("testpred-filter-text-" + idx);
+    const sortSel = document.getElementById("testpred-sort-by-" + idx);
+    const dirSel = document.getElementById("testpred-sort-dir-" + idx);
+
+    if (summaryEl) {
+      summaryEl.textContent = "Memuat data test prediction dari " + runDir + " ...";
+    }
+
+    try {
+      const resp = await fetch(
+        "/training_test_predictions?metrics_run_dir=" + encodeURIComponent(runDir),
+        { headers: { "X-Requested-With": "XMLHttpRequest" } }
+      );
+      const data = await resp.json();
+      if (!resp.ok || data.status !== "ok") {
+        if (summaryEl) {
+          summaryEl.textContent = data.error || "Gagal memuat data test prediction.";
+        }
+        container.dataset.testpredLoaded = "true";
+        return;
+      }
+
+      const items = data.items || [];
+      testPredDataByIdx[idx] = items;
+
+      const aspectSet = new Set();
+      const typeSet = new Set();
+      items.forEach(r => {
+        const goldAspects = (r.aspect && r.aspect.length) ? r.aspect : ["misc"];
+        goldAspects.forEach(a => aspectSet.add(a));
+        (r.comment_type || []).forEach(t => typeSet.add(t));
+      });
+      // UI-only option for out-of-scope reviews (gold aspect empty -> misc)
+      aspectSet.add("misc");
+
+      if (aspectSel) {
+        const current = aspectSel.value;
+        aspectSel.innerHTML = '<option value="">All aspects</option>';
+        Array.from(aspectSet).sort().forEach(a => {
+          const opt = document.createElement("option");
+          opt.value = a;
+          opt.textContent = a;
+          aspectSel.appendChild(opt);
+        });
+        aspectSel.value = current;
+      }
+
+      if (typeSel) {
+        const currentT = typeSel.value;
+        typeSel.innerHTML = '<option value="">All types</option>';
+        Array.from(typeSet).sort().forEach(t => {
+          const opt = document.createElement("option");
+          opt.value = t;
+          opt.textContent = t;
+          typeSel.appendChild(opt);
+        });
+        typeSel.value = currentT;
+      }
+
+      const attach = (el, ev) => {
+        if (!el) return;
+        if (el.dataset.testpredListenerAttached === "true") return;
+        el.addEventListener(ev, () => renderTestPredTable(idx));
+        el.dataset.testpredListenerAttached = "true";
+      };
+
+      const showSel = document.getElementById("testpred-show-" + idx);
+      attach(showSel, "change");
+      attach(aspectSel, "change");
+      attach(typeSel, "change");
+      attach(textInput, "input");
+      attach(sortSel, "change");
+      attach(dirSel, "change");
+
+      if (summaryEl) {
+        summaryEl.textContent = "Total " + items.length + " baris data test.";
+      }
+
+      renderTestPredTable(idx);
+      container.dataset.testpredLoaded = "true";
+    } catch (err) {
+      console.error(err);
+      if (summaryEl) {
+        summaryEl.textContent = "Terjadi error saat memuat data test prediction.";
+      }
+      container.dataset.testpredLoaded = "true";
+    }
+  }
+
+  // toggle training history (load metrics + test predictions saat dibuka)
+  document.querySelectorAll(".history-toggle").forEach(function (btn) {
+    btn.addEventListener("click", async function () {
+      const targetId = btn.getAttribute("data-target");
+      const body = document.getElementById(targetId);
+      if (!body) return;
+
+      const hidden = body.style.display === "none" || body.style.display === "";
+      body.style.display = hidden ? "block" : "none";
+      btn.textContent = hidden ? "Hide" : "Details";
+
+      if (!hidden) {
+        return;
+      }
+
+      const metricsEl = body.querySelector(".history-metrics");
+      if (!metricsEl) return;
+
+      if (metricsEl.dataset.metricsLoaded === "true") {
+        return;
+      }
+
+      const runDir = metricsEl.dataset.metricsRunDir;
+      const idx = metricsEl.dataset.metricsIdx;
+      const summaryEl = document.getElementById("metrics-summary-" + idx);
+      const tableEl = document
+        .getElementById("metrics-table-" + idx)
+        .querySelector("tbody");
+      const aspectCanvas = document.getElementById("metrics-aspect-chart-" + idx);
+      const typeCanvas = document.getElementById("metrics-type-chart-" + idx);
+
+      if (!runDir) {
+        if (summaryEl) {
+          summaryEl.textContent =
+            "Run ini tidak memiliki best run dir / metrics.json.";
+        }
+        metricsEl.dataset.metricsLoaded = "true";
+        return;
+      }
+
+      if (summaryEl) {
+        summaryEl.textContent = "Memuat metrics dari " + runDir + " ...";
+      }
+
+      try {
+        const resp = await fetch(
+          "/training_metrics?metrics_run_dir=" + encodeURIComponent(runDir),
+          { headers: { "X-Requested-With": "XMLHttpRequest" } }
+        );
+        const data = await resp.json();
+        if (!resp.ok || data.status !== "ok") {
+          if (summaryEl) {
+            summaryEl.textContent = data.error || "Gagal memuat metrics.";
+          }
+          metricsEl.dataset.metricsLoaded = "true";
+          return;
+        }
+
+        const ag = data.aspect.global || {};
+        const tg = data.comment_type.global || {};
+
+        if (summaryEl) {
+          summaryEl.textContent =
+            "Aspect — acc: " +
+            Number(ag.accuracy || 0).toFixed(3) +
+            ", F1 micro: " +
+            Number(ag.f1_micro || 0).toFixed(3) +
+            ", F1 macro: " +
+            Number(ag.f1_macro || 0).toFixed(3) +
+            " | Comment type — acc: " +
+            Number(tg.accuracy || 0).toFixed(3) +
+            ", F1 micro: " +
+            Number(tg.f1_micro || 0).toFixed(3) +
+            ", F1 macro: " +
+            Number(tg.f1_macro || 0).toFixed(3);
+        }
+
+        if (tableEl) {
+          tableEl.innerHTML = "";
+          const perAspect = data.aspect.per_class || {};
+          // UI-only: derive misc (none-of-the-4) metrics from test predictions so it appears in tables/charts.
+          try {
+            const respP = await fetch(
+              "/training_test_predictions?metrics_run_dir=" + encodeURIComponent(runDir),
+              { headers: { "X-Requested-With": "XMLHttpRequest" } }
+            );
+            const pdata = await respP.json();
+            if (respP.ok && pdata.status === "ok") {
+              const items = pdata.items || [];
+              let tp=0, fp=0, fn=0, tn=0;
+              items.forEach(r => {
+                const goldMisc = !(r.aspect && r.aspect.length);
+                const predMisc = !(r.pred_aspect_labels && r.pred_aspect_labels.length);
+                if (goldMisc && predMisc) tp += 1;
+                else if (!goldMisc && predMisc) fp += 1;
+                else if (goldMisc && !predMisc) fn += 1;
+                else tn += 1;
+              });
+              const prec = (tp+fp) > 0 ? tp/(tp+fp) : null;
+              const rec = (tp+fn) > 0 ? tp/(tp+fn) : null;
+              const f1 = (prec != null && rec != null && (prec+rec) > 0) ? (2*prec*rec)/(prec+rec) : null;
+              const spec = (tn+fp) > 0 ? tn/(tn+fp) : null;
+              perAspect["misc"] = {
+                precision: prec,
+                recall: rec,
+                f1: f1,
+                specificity: spec,
+                support_pos: tp+fn,
+                tn: tn, fp: fp, fn: fn, tp: tp
+              };
+            }
+          } catch (e) {
+            // ignore misc derivation errors; keep primary metrics intact
+          }
+
+          const perType = data.comment_type.per_class || {};
+
+          function appendRow(label, row, prefix) {
+            const tr = document.createElement("tr");
+            const acc = row.accuracy;
+            const prec = row.precision;
+            const rec = row.recall;
+            const f1 = row.f1;
+            const spec = row.specificity;
+            const supPos = row.support_pos;
+            tr.innerHTML =
+              "<td>" +
+              prefix +
+              label +
+              "</td>" +
+              "<td>" +
+              (acc == null ? "-" : acc.toFixed(3)) +
+              "</td>" +
+              "<td>" +
+              (prec == null ? "-" : prec.toFixed(3)) +
+              "</td>" +
+              "<td>" +
+              (rec == null ? "-" : rec.toFixed(3)) +
+              "</td>" +
+              "<td>" +
+              (f1 == null ? "-" : f1.toFixed(3)) +
+              "</td>" +
+              "<td>" +
+              (spec == null ? "-" : spec.toFixed(3)) +
+              "</td>" +
+              "<td>" +
+              (supPos == null ? "-" : supPos) +
+              "</td>" +
+              "<td>" +
+              (row.tn == null ? "-" : row.tn) +
+              "</td>" +
+              "<td>" +
+              (row.fp == null ? "-" : row.fp) +
+              "</td>" +
+              "<td>" +
+              (row.fn == null ? "-" : row.fn) +
+              "</td>" +
+              "<td>" +
+              (row.tp == null ? "-" : row.tp) +
+              "</td>";
+            tableEl.appendChild(tr);
+          }
+
+          Object.keys(perAspect).filter(l => l !== "misc").forEach(function (label) { appendRow(label, perAspect[label], "A: "); });
+          Object.keys(perType).forEach(function (label) {
+            appendRow(label, perType[label], "T: ");
+          });
+        }
+
+        if (aspectCanvas) {
+          const perAspect = data.aspect.per_class || {};
+          // UI-only: derive misc (none-of-the-4) metrics from test predictions so it appears in tables/charts.
+          try {
+            const respP = await fetch(
+              "/training_test_predictions?metrics_run_dir=" + encodeURIComponent(runDir),
+              { headers: { "X-Requested-With": "XMLHttpRequest" } }
+            );
+            const pdata = await respP.json();
+            if (respP.ok && pdata.status === "ok") {
+              const items = pdata.items || [];
+              let tp=0, fp=0, fn=0, tn=0;
+              items.forEach(r => {
+                const goldMisc = !(r.aspect && r.aspect.length);
+                const predMisc = !(r.pred_aspect_labels && r.pred_aspect_labels.length);
+                if (goldMisc && predMisc) tp += 1;
+                else if (!goldMisc && predMisc) fp += 1;
+                else if (goldMisc && !predMisc) fn += 1;
+                else tn += 1;
+              });
+              const prec = (tp+fp) > 0 ? tp/(tp+fp) : null;
+              const rec = (tp+fn) > 0 ? tp/(tp+fn) : null;
+              const f1 = (prec != null && rec != null && (prec+rec) > 0) ? (2*prec*rec)/(prec+rec) : null;
+              const spec = (tn+fp) > 0 ? tn/(tn+fp) : null;
+              perAspect["misc"] = {
+                precision: prec,
+                recall: rec,
+                f1: f1,
+                specificity: spec,
+                support_pos: tp+fn,
+                tn: tn, fp: fp, fn: fn, tp: tp
+              };
+            }
+          } catch (e) {
+            // ignore misc derivation errors; keep primary metrics intact
+          }
+
+          const labels = Object.keys(perAspect).filter(l => l !== "misc");
+          const f1s = labels.map(l => perAspect[l].f1 || 0.0);
+          const ctxA = aspectCanvas.getContext("2d");
+          new Chart(ctxA, {
+            type: "bar",
+            data: {
+              labels: labels,
+              datasets: [
+                {
+                  label: "Aspect F1 (per class)",
+                  data: f1s,
+                },
+              ],
+            },
+            options: {
+              responsive: true,
+              plugins: { legend: { display: false } },
+              scales: {
+                y: { beginAtZero: true, max: 1.0 },
+              },
+            },
+          });
+        }
+
+        if (typeCanvas) {
+          const perType = data.comment_type.per_class || {};
+          const labelsT = Object.keys(perType);
+          const f1sT = labelsT.map(l => perType[l].f1 || 0.0);
+          const ctxT = typeCanvas.getContext("2d");
+          new Chart(ctxT, {
+            type: "bar",
+            data: {
+              labels: labelsT,
+              datasets: [
+                {
+                  label: "Comment type F1 (per class)",
+                  data: f1sT,
+                },
+              ],
+            },
+            options: {
+              responsive: true,
+              plugins: { legend: { display: false } },
+              scales: {
+                y: { beginAtZero: true, max: 1.0 },
+              },
+            },
+          });
+        }
+
+        await loadTestPredictions(runDir, idx);
+
+        metricsEl.dataset.metricsLoaded = "true";
+      } catch (err) {
+        console.error(err);
+        if (summaryEl) {
+          summaryEl.textContent = "Terjadi error saat memuat metrics.";
+        }
+        metricsEl.dataset.metricsLoaded = "true";
+      }
+    });
+  });
+
+  // ---------------------
+  // Training overview chart (performance over time) – all metrics together
+  // ---------------------
+  let trainingOverviewData = [];
+  let trainingOverviewChart = null;
+
+  (function setupTrainingOverview() {
+    const canvas = document.getElementById("training-overview-chart");
+    const summaryEl = document.getElementById("training-overview-summary");
+
+    if (!canvas) return;
+
+    function renderChart() {
+      if (!trainingOverviewData.length) {
+        if (summaryEl) {
+          summaryEl.textContent =
+            "Belum ada data training history yang memiliki metrics.json.";
+        }
+        return;
+      }
+
+      const labels = trainingOverviewData.map((r, idx) => {
+        const ts = r.created_at || "";
+        const short = ts ? ts.replace("T", " ").slice(0, 16) : "#" + (idx + 1);
+        return short;
+      });
+
+      const aspectF1 = trainingOverviewData.map(r => {
+        const v = r.aspect_f1_macro;
+        return v == null ? null : Number(v);
+      });
+
+      const typeF1 = trainingOverviewData.map(r => {
+        const v = r.comment_type_f1_macro;
+        return v == null ? null : Number(v);
+      });
+
+      const aspectAcc = trainingOverviewData.map(r => {
+        const v = r.aspect_accuracy;
+        return v == null ? null : Number(v);
+      });
+
+      const typeAcc = trainingOverviewData.map(r => {
+        const v = r.comment_type_accuracy;
+        return v == null ? null : Number(v);
+      });
+
+      const bestVal = trainingOverviewData.map(r => {
+        const v = r.best_hp_val_score;
+        return v == null ? null : Number(v);
+      });
+
+      if (trainingOverviewChart) {
+        trainingOverviewChart.destroy();
+        trainingOverviewChart = null;
+      }
+
+      const ctx = canvas.getContext("2d");
+      trainingOverviewChart = new Chart(ctx, {
+        type: "line",
+        data: {
+          labels: labels,
+          datasets: [
+            {
+              label: "Aspect F1 macro (test)",
+              data: aspectF1,
+            },
+            {
+              label: "Comment type F1 macro (test)",
+              data: typeF1,
+            },
+            {
+              label: "Aspect accuracy (test)",
+              data: aspectAcc,
+            },
+            {
+              label: "Comment type accuracy (test)",
+              data: typeAcc,
+            },
+            {
+              label: "Best HP val score",
+              data: bestVal,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: { display: true },
+          },
+          scales: {
+            y: {
+              beginAtZero: true,
+              max: 1.0,
+            },
+          },
+        },
+      });
+
+      if (summaryEl) {
+        function lastNonNull(arr) {
+          const nonNull = arr.filter(v => v != null);
+          return nonNull.length ? nonNull[nonNull.length - 1] : null;
+        }
+
+        const lastAspectF1 = lastNonNull(aspectF1);
+        const lastTypeF1 = lastNonNull(typeF1);
+        const lastAspectAcc = lastNonNull(aspectAcc);
+        const lastTypeAcc = lastNonNull(typeAcc);
+        const lastBestVal = lastNonNull(bestVal);
+
+        summaryEl.textContent =
+          "Menampilkan " +
+          trainingOverviewData.length +
+          " run. " +
+          "Aspect F1 macro terakhir: " +
+          (lastAspectF1 == null ? "-" : lastAspectF1.toFixed(3)) +
+          ", " +
+          "Comment type F1 macro terakhir: " +
+          (lastTypeF1 == null ? "-" : lastTypeF1.toFixed(3)) +
+          ", " +
+          "Aspect accuracy terakhir: " +
+          (lastAspectAcc == null ? "-" : lastAspectAcc.toFixed(3)) +
+          ", " +
+          "Comment type accuracy terakhir: " +
+          (lastTypeAcc == null ? "-" : lastTypeAcc.toFixed(3)) +
+          ", " +
+          "Best HP val score terakhir: " +
+          (lastBestVal == null ? "-" : lastBestVal.toFixed(3)) +
+          ".";
+      }
+    }
+
+    fetch("/training_overview_metrics?limit=100", {
+      headers: { "X-Requested-With": "XMLHttpRequest" },
+    })
+      .then(resp => resp.json())
+      .then(data => {
+        if (!data || data.status !== "ok") {
+          if (summaryEl) {
+            summaryEl.textContent =
+              (data && data.error) ||
+              "Gagal memuat data training overview.";
+          }
+          return;
+        }
+        trainingOverviewData = data.runs || [];
+        if (!trainingOverviewData.length) {
+          if (summaryEl) {
+            summaryEl.textContent =
+              "Belum ada run training yang tercatat.";
+          }
+          return;
+        }
+        renderChart();
+      })
+      .catch(err => {
+        console.error(err);
+        if (summaryEl) {
+          summaryEl.textContent =
+            "Terjadi error saat memuat data training overview.";
+        }
+      });
+  })();
+</script>
+
+{% endblock %}

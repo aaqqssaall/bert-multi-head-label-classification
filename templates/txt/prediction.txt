@@ -1,0 +1,514 @@
+{% extends "layout.html" %}
+{% block content %}
+
+<section class="card">
+  <h2>Prediction: Aspect &amp; Comment Type</h2>
+  {% if not model_ready %}
+    <p>Belum ada model terlatih. Silakan jalankan training terlebih dahulu di tab <strong>Training</strong>.</p>
+  {% else %}
+    <p class="small">
+      Gunakan form di bawah untuk memprediksi aspek dan jenis komentar dari ulasan baru.
+      Hasil prediksi dan analisis perbandingan dengan zero-shot NLI akan muncul di bawah form pada bagian
+      <strong>Prediction analysis</strong>.
+    </p>
+  {% endif %}
+
+  <form id="prediction-form" enctype="multipart/form-data" class="form-grid">
+    <div>
+      <h3>Input data</h3>
+      <label for="file">CSV file (opsional)</label>
+      <input type="file" id="file" name="file" accept=".csv,.txt" />
+      <p class="small">
+        Jika diisi, sistem akan membaca kolom <code>review</code> / <code>text</code> / <code>ulasan</code> atau kolom pertama.
+      </p>
+
+      <label for="text_input">Manual text input (opsional)</label>
+      <textarea id="text_input" name="text_input" rows="6" placeholder="Satu ulasan per baris..."></textarea>
+    </div>
+
+    <div>
+      <h3>Informasi</h3>
+      <p class="small">
+        Prediction akan menggunakan model IndoBERT terakhir yang terlatih.<br/>
+        Hasil akan disimpan ke <code>data/predictions/pred_YYYYMMDDhhmmss.jsonl</code> dan bisa dipilih ulang dari
+        dropdown <strong>Previous predictions</strong> pada bagian analisis.
+      </p>
+      <button type="submit" class="btn-primary" {% if not model_ready %}disabled{% endif %}>
+        Run prediction (new)
+      </button>
+      <p class="small" id="prediction-status-message"></p>
+    </div>
+  </form>
+</section>
+
+<section class="card" id="prediction-analysis-section">
+  <h3>Prediction analysis</h3>
+
+  <div class="filter-bar" style="margin-bottom: 8px;">
+    <label>
+      Previous predictions
+      <select id="prediction-run-select">
+        <option value="">Current run (this session)</option>
+        {% if prediction_history %}
+          {% for run in prediction_history %}
+            <option value="{{ run.pred_path }}">
+              {{ run.ts }} — {{ run.num_records }} rec
+            </option>
+          {% endfor %}
+        {% endif %}
+      </select>
+    </label>
+  </div>
+
+  <p class="small" id="prediction-summary"></p>
+
+  <form class="filter-bar" id="prediction-filter-form" onsubmit="return false;">
+    <label>
+      Agreement
+      <select id="filter-agreement">
+        <option value="">All</option>
+        <option value="full">Full</option>
+        <option value="partial">Partial</option>
+        <option value="none">None</option>
+      </select>
+    </label>
+
+    <label>
+      Aspect
+      <select id="filter-aspect">
+        <option value="">All</option>
+        {% for asp in aspect_labels %}
+        <option value="{{ asp }}">{{ asp }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>
+      Comment type
+      <select id="filter-type">
+        <option value="">All</option>
+        {% for ct in comment_type_labels %}
+        <option value="{{ ct }}">{{ ct }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>
+      Sort by
+      <select id="sort-by">
+        <option value="created_at">Created time</option>
+        <option value="overall">Overall confidence</option>
+        <option value="aspect_jaccard">Aspect Jaccard</option>
+        <option value="comment_type_jaccard">Type Jaccard</option>
+        <option value="nli_quality_score">NLI quality</option>
+      </select>
+    </label>
+
+    <label>
+      Direction
+      <select id="sort-dir">
+        <option value="desc">Desc</option>
+        <option value="asc">Asc</option>
+      </select>
+    </label>
+
+    <label>
+      Search text
+      <input type="text" id="filter-text" placeholder="Cari di review..." />
+    </label>
+
+    <button type="button" class="btn-primary" id="apply-filter-btn">Apply</button>
+  </form>
+
+  <div class="prediction-table-wrapper">
+    <table class="data-table" id="prediction-table">
+      <thead>
+        <tr>
+          <th style="width: 140px;">Meta</th>
+          <th style="width: 120px;">NLI aspects</th>
+          <th style="width: 120px;">Model aspects</th>
+          <th style="width: 120px;">NLI type(s)</th>
+          <th style="width: 120px;">Model type(s)</th>
+          <th style="width: 140px;">Agreement</th>
+          <th style="width: 260px;">Review text</th>
+          <th style="width: 220px;">Confidence snapshot</th>
+        </tr>
+      </thead>
+      <tbody id="prediction-table-body">
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<script>
+  const ASPECT_LABELS = {{ aspect_labels | tojson }};
+  const COMMENT_TYPE_LABELS = {{ comment_type_labels | tojson }};
+
+  let predictionRecords = [];
+  let currentRunMeta = { pred_path: "", model_run_dir: "" };
+
+  function fmtFloat(x, digits) {
+    if (x === null || x === undefined || Number.isNaN(x)) return "-";
+    return Number(x).toFixed(digits);
+  }
+
+  function buildConfidenceSnapshot(rec) {
+    const nd = rec.nli_debug || {};
+    const nliAsp = nd.aspect_confidence || {};
+    const nliType = nd.comment_confidence || {};
+
+    const mc = rec.model_confidence || {};
+    // Backend payloads may store per-label probs at different keys; support both.
+    const mAsp = (rec.model_probs_aspects) || (mc.aspect_probs) || {};
+    const mType = (rec.model_probs_comment_types) || (mc.comment_type_probs) || {};
+
+    const parts = [];
+
+    ASPECT_LABELS.forEach(lab => {
+      const nliVal = nliAsp[lab];
+      const mVal = mAsp[lab];
+      if (nliVal !== undefined || mVal !== undefined) {
+        parts.push(
+          lab + ": NLI " + fmtFloat(nliVal, 2) + " / Indo " + fmtFloat(mVal, 2)
+        );
+      }
+    });
+
+    COMMENT_TYPE_LABELS.forEach(lab => {
+      const nliVal = nliType[lab];
+      const mVal = mType[lab];
+      if (nliVal !== undefined || mVal !== undefined) {
+        parts.push(
+          "type " + lab + ": NLI " + fmtFloat(nliVal, 2) + " / Indo " + fmtFloat(mVal, 2)
+        );
+      }
+    });
+
+    if (parts.length === 0) {
+      return "<span class=\"small\">Tidak ada detail confidence.</span>";
+    }
+    return "<span class=\"small\">" + parts.join("<br/>") + "</span>";
+  }
+
+  function renderPredictionTable(records) {
+    const tbody = document.getElementById("prediction-table-body");
+    tbody.innerHTML = "";
+
+    records.forEach((rec, idx) => {
+      const tr = document.createElement("tr");
+
+      const created = rec.created_at || "-";
+      const lq = rec.label_quality || "-";
+      const nli_q = rec.nli_quality_score !== undefined ? fmtFloat(rec.nli_quality_score, 3) : "-";
+
+      const mc = rec.model_confidence || {};
+      const overall = mc.overall !== undefined ? fmtFloat(mc.overall, 3) : "-";
+      const asp_j = mc.aspect_jaccard !== undefined ? fmtFloat(mc.aspect_jaccard, 3) : "-";
+      const type_j = mc.comment_type_jaccard !== undefined ? fmtFloat(mc.comment_type_jaccard, 3) : "-";
+
+      const ag = rec.agreement || {};
+      const aAsp = ag.aspect || "unknown";
+      const aType = ag.comment_type || "unknown";
+      const aOverall = ag.overall || "unknown";
+
+      const metaTd = document.createElement("td");
+      metaTd.innerHTML =
+        "<div class=\"meta-block\">" +
+        "<div><strong>#</strong> " + (idx + 1) + "</div>" +
+        "<div><strong>Created:</strong> " + created + "</div>" +
+        "<div><strong>Label quality:</strong> " + lq + " (NLI " + nli_q + ")</div>" +
+        "<div><strong>Overall conf:</strong> " + overall + "</div>" +
+        "<div><strong>Aspect Jaccard:</strong> " + asp_j + "</div>" +
+        "<div><strong>Type Jaccard:</strong> " + type_j + "</div>" +
+        "</div>";
+
+      const nliAspTd = document.createElement("td");
+      const na = rec.nli_aspects || [];
+      if (na.length) {
+        const ul = document.createElement("ul");
+        ul.className = "label-list";
+        na.forEach(v => {
+          const li = document.createElement("li");
+          li.textContent = v;
+          ul.appendChild(li);
+        });
+        nliAspTd.appendChild(ul);
+      } else {
+        nliAspTd.innerHTML = "<span class=\"small\">–</span>";
+      }
+
+      const modelAspTd = document.createElement("td");
+      const ma = rec.model_pred_aspects || [];
+      if (ma.length) {
+        const ul = document.createElement("ul");
+        ul.className = "label-list";
+        ma.forEach(v => {
+          const li = document.createElement("li");
+          li.textContent = v;
+          ul.appendChild(li);
+        });
+        modelAspTd.appendChild(ul);
+      } else {
+        modelAspTd.innerHTML = "<span class=\"small\">–</span>";
+      }
+
+      const nliTypeTd = document.createElement("td");
+      const nt = rec.nli_comment_types || [];
+      const ntPrimary = rec.nli_comment_type || null;
+      if (nt.length || ntPrimary) {
+        const ul = document.createElement("ul");
+        ul.className = "label-list";
+        if (nt.length) {
+          nt.forEach(v => {
+            const li = document.createElement("li");
+            li.textContent = v + (v === ntPrimary ? " (primary)" : "");
+            ul.appendChild(li);
+          });
+        } else {
+          const li = document.createElement("li");
+          li.textContent = ntPrimary;
+          ul.appendChild(li);
+        }
+        nliTypeTd.appendChild(ul);
+      } else {
+        nliTypeTd.innerHTML = "<span class=\"small\">–</span>";
+      }
+
+      const modelTypeTd = document.createElement("td");
+      const mt = rec.model_pred_comment_types || [];
+      const mtPrimary = rec.model_pred_comment_type || null;
+      if (mt.length || mtPrimary) {
+        const ul = document.createElement("ul");
+        ul.className = "label-list";
+        if (mt.length) {
+          mt.forEach(v => {
+            const li = document.createElement("li");
+            li.textContent = v + (v === mtPrimary ? " (primary)" : "");
+            ul.appendChild(li);
+          });
+        } else {
+          const li = document.createElement("li");
+          li.textContent = mtPrimary;
+          ul.appendChild(li);
+        }
+        modelTypeTd.appendChild(ul);
+      } else {
+        modelTypeTd.innerHTML = "<span class=\"small\">–</span>";
+      }
+
+      const agreeTd = document.createElement("td");
+      agreeTd.innerHTML =
+        "<div class=\"meta-block\">" +
+        "<div>Aspect: <span class=\"tag-agree tag-" + aAsp + "\">" + aAsp + "</span></div>" +
+        "<div>Type: <span class=\"tag-agree tag-" + aType + "\">" + aType + "</span></div>" +
+        "<div>Overall: <span class=\"tag-agree tag-" + aOverall + "\">" + aOverall + "</span></div>" +
+        "</div>";
+
+      const textTd = document.createElement("td");
+      const ta = document.createElement("textarea");
+      ta.className = "review-text";
+      ta.readOnly = true;
+      ta.textContent = rec.text || rec.text_normalized || "";
+      textTd.appendChild(ta);
+
+      const confTd = document.createElement("td");
+      confTd.innerHTML = buildConfidenceSnapshot(rec);
+
+      tr.appendChild(metaTd);
+      tr.appendChild(nliAspTd);
+      tr.appendChild(modelAspTd);
+      tr.appendChild(nliTypeTd);
+      tr.appendChild(modelTypeTd);
+      tr.appendChild(agreeTd);
+      tr.appendChild(textTd);
+      tr.appendChild(confTd);
+
+      tbody.appendChild(tr);
+    });
+  }
+
+  function applyFiltersAndRender() {
+    let filtered = predictionRecords.slice();
+
+    const agr = document.getElementById("filter-agreement").value;
+    const asp = document.getElementById("filter-aspect").value;
+    const typ = document.getElementById("filter-type").value;
+    const qtext = document.getElementById("filter-text").value.toLowerCase().trim();
+    const sortBy = document.getElementById("sort-by").value;
+    const sortDir = document.getElementById("sort-dir").value;
+
+    if (agr) {
+      filtered = filtered.filter(r => {
+        const ag = r.agreement || {};
+        return ag.overall === agr;
+      });
+    }
+
+    if (asp) {
+      filtered = filtered.filter(r => {
+        const nli = r.nli_aspects || [];
+        const model = r.model_pred_aspects || [];
+        return nli.includes(asp) || model.includes(asp);
+      });
+    }
+
+    if (typ) {
+      filtered = filtered.filter(r => {
+        const nli = r.nli_comment_types || [];
+        const model = r.model_pred_comment_types || [];
+        const nliPrim = r.nli_comment_type || null;
+        const modelPrim = r.model_pred_comment_type || null;
+        return nli.includes(typ) || model.includes(typ) || nliPrim === typ || modelPrim === typ;
+      });
+    }
+
+    if (qtext) {
+      filtered = filtered.filter(r => {
+        const txt = (r.text_normalized || r.text || "").toLowerCase();
+        return txt.includes(qtext);
+      });
+    }
+
+    filtered.sort((a, b) => {
+      let va, vb;
+
+      if (sortBy === "created_at") {
+        va = a.created_at || "";
+        vb = b.created_at || "";
+      } else if (sortBy === "overall") {
+        va = (a.model_confidence || {}).overall ?? null;
+        vb = (b.model_confidence || {}).overall ?? null;
+      } else if (sortBy === "aspect_jaccard") {
+        va = (a.model_confidence || {}).aspect_jaccard ?? null;
+        vb = (b.model_confidence || {}).aspect_jaccard ?? null;
+      } else if (sortBy === "comment_type_jaccard") {
+        va = (a.model_confidence || {}).comment_type_jaccard ?? null;
+        vb = (b.model_confidence || {}).comment_type_jaccard ?? null;
+      } else if (sortBy === "nli_quality_score") {
+        va = a.nli_quality_score ?? null;
+        vb = b.nli_quality_score ?? null;
+      } else {
+        va = 0;
+        vb = 0;
+      }
+
+      if (va === null || va === undefined) va = -1e9;
+      if (vb === null || vb === undefined) vb = -1e9;
+
+      if (va < vb) return sortDir === "asc" ? -1 : 1;
+      if (va > vb) return sortDir === "asc" ? 1 : -1;
+      return 0;
+    });
+
+    renderPredictionTable(filtered);
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    const form = document.getElementById("prediction-form");
+    const statusEl = document.getElementById("prediction-status-message");
+    const analysisSection = document.getElementById("prediction-analysis-section");
+    const summaryEl = document.getElementById("prediction-summary");
+    const applyFilterBtn = document.getElementById("apply-filter-btn");
+    const runSelect = document.getElementById("prediction-run-select");
+
+    if (applyFilterBtn) {
+      applyFilterBtn.addEventListener("click", function () {
+        applyFiltersAndRender();
+      });
+    }
+
+    if (runSelect) {
+      runSelect.addEventListener("change", async function () {
+        const val = runSelect.value;
+        if (!val) {
+          // kembali ke hasil "current run" di memori
+          applyFiltersAndRender();
+          if (predictionRecords.length === 0) {
+            summaryEl.textContent = "Belum ada prediction di sesi ini. " +
+              "Silakan jalankan prediction baru atau pilih salah satu 'Previous predictions'.";
+          }
+          return;
+        }
+
+        statusEl.textContent = "Loading previous prediction ...";
+        statusEl.className = "small";
+
+        try {
+          const resp = await fetch("/prediction_run?pred_path=" + encodeURIComponent(val), {
+            headers: { "X-Requested-With": "XMLHttpRequest" },
+          });
+          const data = await resp.json();
+          if (!resp.ok || data.status === "error") {
+            statusEl.textContent = data.error || "Gagal memuat prediction lama.";
+            statusEl.className = "small job-error";
+            return;
+          }
+          predictionRecords = data.records || [];
+          const total = data.total || predictionRecords.length;
+          currentRunMeta.pred_path = data.pred_path || "";
+          currentRunMeta.model_run_dir = data.model_run_dir || "";
+
+          summaryEl.textContent =
+            "Menampilkan " + total + " record dari file " + (currentRunMeta.pred_path || "-") +
+            ", model run: " + (currentRunMeta.model_run_dir || "-") + ".";
+          applyFiltersAndRender();
+          statusEl.textContent = "";
+        } catch (err) {
+          console.error(err);
+          statusEl.textContent = "Terjadi error saat memuat prediction lama.";
+          statusEl.className = "small job-error";
+        }
+      });
+    }
+
+    form.addEventListener("submit", async function (e) {
+      e.preventDefault();
+      statusEl.textContent = "Running prediction...";
+      statusEl.className = "small";
+
+      const formData = new FormData(form);
+
+      try {
+        const resp = await fetch("/run_prediction", {
+          method: "POST",
+          body: formData,
+          headers: {
+            "X-Requested-With": "XMLHttpRequest",
+          },
+        });
+
+        const data = await resp.json();
+
+        if (!resp.ok || data.status === "error") {
+          statusEl.textContent = data.error || "Terjadi error saat prediction.";
+          statusEl.className = "small job-error";
+          return;
+        }
+
+        predictionRecords = data.records || [];
+        const total = data.total || predictionRecords.length;
+        currentRunMeta.pred_path = data.pred_path || "";
+        currentRunMeta.model_run_dir = data.model_run_dir || "";
+
+        statusEl.textContent = "Prediction selesai. " + total + " record.";
+        statusEl.className = "small";
+
+        summaryEl.textContent =
+          "Menampilkan " + total + " record. " +
+          "Model run: " + (currentRunMeta.model_run_dir || "-") +
+          ", file: " + (currentRunMeta.pred_path || "-") + ".";
+
+        
+        // reset dropdown ke "current run"
+        if (runSelect) runSelect.value = "";
+        applyFiltersAndRender();
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = "Terjadi error saat menghubungi server.";
+        statusEl.className = "small job-error";
+      }
+    });
+  });
+</script>
+
+{% endblock %}

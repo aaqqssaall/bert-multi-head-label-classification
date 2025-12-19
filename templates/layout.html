@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Review Aspect & Comment Type Labelling</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body data-theme="">
+  <header>
+    <div class="container">
+      <h1>Aspect & Comment Type Labelling</h1>
+      <nav class="top-nav">
+        <a href="/">Training</a>
+        <a href="/relabel_low_score">Relabeling</a>
+        <a href="/prediction">Prediction</a>
+        <a href="/dashboard">Dashboard</a>
+        <a href="/kbs">KBS</a>
+        <button type="button" id="themeToggle" class="theme-toggle" aria-label="Toggle theme" title="Toggle theme">
+          <span class="theme-icon" aria-hidden="true">☾</span>
+        </button>
+      </nav>
+    </div>
+  </header>
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+  <footer>
+    <div class="container">
+      <small>IndoBERT + NLI Review Analysis Prototype</small>
+    </div>
+  </footer>
+  <script>
+    (function () {
+      const KEY = "ui_theme";
+      const body = document.body;
+      const btn = document.getElementById("themeToggle");
+      const icon = btn ? btn.querySelector(".theme-icon") : null;
+
+      function systemPref() {
+        return (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light";
+      }
+
+      function applyTheme(theme) {
+        body.dataset.theme = theme;
+        if (icon) icon.textContent = (theme === "dark") ? "☀" : "☾";
+      }
+
+      const saved = localStorage.getItem(KEY);
+      applyTheme(saved || systemPref());
+
+      if (btn) {
+        btn.addEventListener("click", function () {
+          const next = (body.dataset.theme === "dark") ? "light" : "dark";
+          localStorage.setItem(KEY, next);
+          applyTheme(next);
+        });
+      }
+    })();
+  </script>
+
+</body>
+</html>

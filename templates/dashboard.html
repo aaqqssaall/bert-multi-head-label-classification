@@ -1,0 +1,1135 @@
+{% extends "layout.html" %}
+{% block content %}
+
+<section class="card">
+  <h2>Analytics Dashboard</h2>
+
+  {% if not has_data %}
+    <p>Belum ada data prediksi untuk dianalisis. Jalankan prediction terlebih dahulu.</p>
+  {% else %}
+    <p class="small">
+      Run selection: <strong>{{ selected_run }}</strong>.
+      Total record ter-load: <strong>{{ records_total }}</strong>.
+    </p>
+  {% endif %}
+</section>
+
+{% if has_data %}
+
+<section class="card">
+  <h3>Filters</h3>
+
+  <form method="get" action="/dashboard" class="filter-bar">
+    <div class="filter-group">
+      <label class="filter-label">
+        <span>Prediction run</span>
+        <select name="run">
+          <option value="all" {% if selected_run == "all" %}selected{% endif %}>All runs</option>
+          {% for r in runs %}
+            <option value="{{ r.id }}" {% if selected_run == r.id %}selected{% endif %}>
+              {{ r.id }} ({{ r.ts }})
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label class="filter-label">
+        <span>Min confidence</span>
+        <input type="number" step="0.01" min="0" max="1" name="min_conf" value="{{ filter_min_conf }}">
+      </label>
+
+      <label class="filter-label">
+        <span>Aspect</span>
+        <select name="aspect">
+          <option value="" {% if not filter_aspect %}selected{% endif %}>All</option>
+          {% for a in available_aspects %}
+            <option value="{{ a }}" {% if filter_aspect == a %}selected{% endif %}>{{ a }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label class="filter-label">
+        <span>Comment type</span>
+        <select name="comment_type">
+          <option value="" {% if not filter_type %}selected{% endif %}>All</option>
+          {% for t in available_types %}
+            <option value="{{ t }}" {% if filter_type == t %}selected{% endif %}>{{ t }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label class="filter-label" style="min-width:260px;">
+        <span>Keyword</span>
+        <input type="text" name="q" value="{{ filter_q }}" placeholder="text / token / label">
+      </label>
+
+      <label class="filter-label">
+        <span>Compare A</span>
+        <select name="compare_a">
+          <option value="" {% if not compare_a_selected %}selected{% endif %}>None</option>
+          {% for r in runs %}
+            <option value="{{ r.id }}" {% if compare_a_selected == r.id %}selected{% endif %}>
+              {{ r.id }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label class="filter-label">
+        <span>Compare B</span>
+        <select name="compare_b">
+          <option value="" {% if not compare_b_selected %}selected{% endif %}>None</option>
+          {% for r in runs %}
+            <option value="{{ r.id }}" {% if compare_b_selected == r.id %}selected{% endif %}>
+              {{ r.id }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+
+    <button type="submit" class="btn-primary filter-apply-btn">Apply</button>
+  </form>
+
+  <p class="small" style="margin-top:10px;">
+    Confidence stats (filtered):
+    avg {% if agg.conf_stats.avg is not none %}{{ "%.3f"|format(agg.conf_stats.avg) }}{% else %}-{% endif %},
+    min {% if agg.conf_stats.min is not none %}{{ "%.3f"|format(agg.conf_stats.min) }}{% else %}-{% endif %},
+    max {% if agg.conf_stats.max is not none %}{{ "%.3f"|format(agg.conf_stats.max) }}{% else %}-{% endif %},
+    n={{ agg.conf_stats.n }}.
+  </p>
+</section>
+
+<section class="card">
+  <h3>Overview</h3>
+  <div class="summary-grid">
+    <div>
+      <h4>Total reviews</h4>
+      <p style="font-size:24px;font-weight:700;margin:4px 0 0 0;">{{ records_total }}</p>
+      <p class="small">Jumlah record yang memenuhi filter saat ini.</p>
+    </div>
+    <div>
+      <h4>Aspects</h4>
+      <p style="font-size:24px;font-weight:700;margin:4px 0 0 0;">{{ agg.aspect_counts|length }}</p>
+      <p class="small">Jumlah aspek yang muncul setelah filter.</p>
+    </div>
+    <div>
+      <h4>Comment types</h4>
+      <p style="font-size:24px;font-weight:700;margin:4px 0 0 0;">{{ agg.type_counts|length }}</p>
+      <p class="small">Jumlah tipe komentar setelah filter.</p>
+    </div>
+    <div>
+      <h4>Wordcloud items</h4>
+      <p style="font-size:24px;font-weight:700;margin:4px 0 0 0;">{{ agg.top_tokens|length }}</p>
+      <p class="small">Jumlah item untuk wordcloud (source tergantung selector).</p>
+    </div>
+  </div>
+</section>
+
+
+<section class="card">
+  <h3>Growth & momentum</h3>
+  <p class="small">
+    Ringkasan ini dihitung dari timeline (date_counts) pada filter saat ini. Growth dihitung sebagai perbandingan dua jendela kalender terakhir yang sama panjang.
+  </p>
+
+  <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; margin-bottom:10px;">
+    <label class="small" style="display:flex; flex-direction:column; gap:4px;">
+      <span>Window (days)</span>
+      <select id="growthWindow" style="min-width:120px;">
+        <option value="7" selected>7</option>
+        <option value="14">14</option>
+        <option value="30">30</option>
+      </select>
+    </label>
+    <span class="small" id="growthNote"></span>
+  </div>
+
+  <div class="summary-grid">
+    <div>
+      <h4>Last day</h4>
+      <p style="font-size:24px;font-weight:700;margin:4px 0 0 0;" id="kpiLastDay">-</p>
+      <p class="small" id="kpiLastDayLabel"></p>
+    </div>
+    <div>
+      <h4>Window sum</h4>
+      <p style="font-size:24px;font-weight:700;margin:4px 0 0 0;" id="kpiWinSum">-</p>
+      <p class="small" id="kpiWinLabel"></p>
+    </div>
+    <div>
+      <h4>Prev window</h4>
+      <p style="font-size:24px;font-weight:700;margin:4px 0 0 0;" id="kpiPrevSum">-</p>
+      <p class="small" id="kpiPrevLabel"></p>
+    </div>
+    <div>
+      <h4>Growth (B - A)</h4>
+      <p style="font-size:24px;font-weight:700;margin:4px 0 0 0;" id="kpiGrowthPct">-</p>
+      <p class="small" id="kpiGrowthLabel"></p>
+    </div>
+  </div>
+
+  <div class="chart-grid" style="margin-top:14px;">
+    <div>
+      <h4 class="small">Daily delta (day-over-day)</h4>
+      <canvas id="chartDelta"></canvas>
+      <p class="small" id="deltaHint" style="margin-top:8px;"></p>
+    </div>
+    <div>
+      <h4 class="small">Peak & volatility</h4>
+      <div class="table-wrapper">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th style="width:220px;">Metric</th>
+              <th>Value</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>Peak day</td><td id="kpiPeakDay">-</td></tr>
+            <tr><td>Peak volume</td><td id="kpiPeakCount">-</td></tr>
+            <tr><td>Peak share (of total)</td><td id="kpiPeakShare">-</td></tr>
+            <tr><td>Best day delta</td><td id="kpiBestDelta">-</td></tr>
+            <tr><td>Worst day delta</td><td id="kpiWorstDelta">-</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="small" style="margin-top:8px;">
+        Delta dihitung dari perbedaan volume harian. Jika ada gap tanggal, hari yang hilang dianggap 0 agar growth tetap bermakna secara kalender.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="card">
+  <h3>Distribution quality</h3>
+  <p class="small">
+    Indikator ringkas untuk melihat apakah label terdistribusi merata atau sangat terkonsentrasi pada sedikit kelas.
+  </p>
+
+  <div class="summary-grid">
+    <div>
+      <h4>Top aspect share</h4>
+      <p style="font-size:24px;font-weight:700;margin:4px 0 0 0;" id="kpiTopAspectShare">-</p>
+      <p class="small" id="kpiTopAspectLabel"></p>
+    </div>
+    <div>
+      <h4>Aspect diversity</h4>
+      <p style="font-size:24px;font-weight:700;margin:4px 0 0 0;" id="kpiAspectEntropy">-</p>
+      <p class="small">Normalized entropy (0–1).</p>
+    </div>
+    <div>
+      <h4>Top type share</h4>
+      <p style="font-size:24px;font-weight:700;margin:4px 0 0 0;" id="kpiTopTypeShare">-</p>
+      <p class="small" id="kpiTopTypeLabel"></p>
+    </div>
+    <div>
+      <h4>Type diversity</h4>
+      <p style="font-size:24px;font-weight:700;margin:4px 0 0 0;" id="kpiTypeEntropy">-</p>
+      <p class="small">Normalized entropy (0–1).</p>
+    </div>
+  </div>
+
+  <div style="margin-top:14px;">
+    <h4 class="small">Top Aspect × Comment type combinations</h4>
+    <div class="table-wrapper">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th style="width:220px;">Aspect</th>
+            <th style="width:160px;">Comment type</th>
+            <th style="text-align:right;">Count</th>
+            <th style="text-align:right;">Share</th>
+          </tr>
+        </thead>
+        <tbody id="topCombosBody"></tbody>
+      </table>
+    </div>
+    <p class="small" id="comboHint" style="margin-top:8px;"></p>
+  </div>
+</section>
+
+<section class="card">
+  <h3>Distributions</h3>
+  <div class="chart-grid">
+    <div>
+      <h4 class="small">Comment type mix</h4>
+      <canvas id="chartTypes"></canvas>
+    </div>
+    <div>
+      <h4 class="small">Top aspects (Top 20)</h4>
+      <canvas id="chartAspects"></canvas>
+    </div>
+  </div>
+</section>
+
+<section class="card">
+  <h3>Temporal trend</h3>
+  <p class="small">Trend volume ulasan per tanggal (created_at/created_date).</p>
+  <canvas id="chartTimeline"></canvas>
+</section>
+
+<section class="card">
+  <h3>Wordcloud</h3>
+  <p class="small">
+    Wordcloud berbasis SVG. Scroll untuk zoom, drag untuk pan. Klik kata untuk memfilter sample reviews.
+  </p>
+
+  <div style="display:flex; gap:10px; align-items:center; margin-bottom:10px; flex-wrap:wrap;">
+    <label class="small" style="display:flex; align-items:center; gap:6px;">
+      <span>Word source</span>
+      <select id="wcSource">
+        <option value="tokens" selected>Tokens</option>
+        <option value="bigrams">Bigrams</option>
+        <option value="trigrams">Trigrams</option>
+      </select>
+    </label>
+
+    <button type="button" class="btn-secondary" id="btnDownloadWcSvg">Download SVG</button>
+
+    <span class="small" id="wcHint"></span>
+  </div>
+
+  <div class="wordcloud-wrap" style="width:100%; height:520px; border:1px solid var(--border); border-radius:8px; background:var(--surface); overflow:hidden;">
+    <svg id="wcSvg" style="width:100%; height:100%; display:block;"></svg>
+  </div>
+</section>
+
+<section class="card">
+  <h3>Aspect × Comment type heatmap</h3>
+  <p class="small">
+    Membantu melihat kombinasi isu utama untuk keputusan bisnis (misalnya service × complaint).
+  </p>
+
+  {% set types = (agg.type_counts.keys()|list)|sort %}
+  {% set aspects = (agg.aspect_counts.keys()|list)|sort %}
+
+  {% set ns = namespace(maxv=0) %}
+  {% for a in aspects %}
+    {% for t in types %}
+      {% set v = (agg.heatmap.get(a, {}).get(t, 0)) %}
+      {% if v > ns.maxv %}{% set ns.maxv = v %}{% endif %}
+    {% endfor %}
+  {% endfor %}
+
+  <div class="table-wrapper">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width:180px;">Aspect</th>
+          {% for t in types %}
+            <th style="text-align:center; min-width:110px;">{{ t }}</th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in aspects %}
+        <tr>
+          <td><strong>{{ a }}</strong></td>
+          {% for t in types %}
+            {% set v = (agg.heatmap.get(a, {}).get(t, 0)) %}
+            {% set pct = 0 if ns.maxv == 0 else (v / ns.maxv) %}
+            <td
+              style="
+                text-align:center;
+                background: rgba(37, 99, 235, {{ "%.3f"|format(pct) }});
+                color: {% if pct > 0.45 %}#fff{% else %}#111{% endif %};
+              "
+              title="{{ a }} × {{ t }} = {{ v }}"
+            >
+              {{ v }}
+            </td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+{% if compare %}
+<section class="card">
+  <h3>Run comparison</h3>
+  <p class="small">
+    Delta dihitung sebagai <strong>B - A</strong>.
+    A=<code>{{ compare.a.id }}</code>, B=<code>{{ compare.b.id }}</code>.
+    Positif berarti meningkat di run B, negatif berarti menurun.
+  </p>
+
+  <div class="chart-grid">
+    <div>
+      <h4 class="small">Delta aspects (Top 20 by abs change)</h4>
+      <div class="table-wrapper">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Aspect</th>
+              <th style="width:90px; text-align:right;">A</th>
+              <th style="width:90px; text-align:right;">B</th>
+              <th style="width:90px; text-align:right;">Δ</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% set da = compare.delta_aspects %}
+            {% set a_counts = compare.a.agg.aspect_counts %}
+            {% set b_counts = compare.b.agg.aspect_counts %}
+            {% set pairs = [] %}
+            {% for k, v in da.items() %}
+              {% set _ = pairs.append((k, v)) %}
+            {% endfor %}
+            {% for item in (pairs|sort(attribute=1, reverse=true))[:0] %}{% endfor %}
+            {# Jinja tidak punya sort abs built-in; render top 20 secara sederhana #}
+            {% for k, v in pairs %}
+            {% endfor %}
+
+            {% set ns2 = namespace(items=[]) %}
+            {% for k, v in da.items() %}
+              {% set _ = ns2.items.append({"k": k, "v": v, "abs": (v if v>=0 else -v)}) %}
+            {% endfor %}
+            {% set ns3 = namespace(sorted=ns2.items|sort(attribute="abs", reverse=true)) %}
+
+            {% for it in ns3.sorted[:20] %}
+              {% set k = it.k %}
+              {% set v = it.v %}
+              <tr>
+                <td>{{ k }}</td>
+                <td style="text-align:right;">{{ a_counts.get(k, 0) }}</td>
+                <td style="text-align:right;">{{ b_counts.get(k, 0) }}</td>
+                <td style="text-align:right; color:{% if v>0 %}#166534{% elif v<0 %}#991b1b{% else %}#111{% endif %};">
+                  {% if v>0 %}+{% endif %}{{ v }}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div>
+      <h4 class="small">Delta comment types</h4>
+      <div class="table-wrapper">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Type</th>
+              <th style="width:90px; text-align:right;">A</th>
+              <th style="width:90px; text-align:right;">B</th>
+              <th style="width:90px; text-align:right;">Δ</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% set dt = compare.delta_types %}
+            {% set a_t = compare.a.agg.type_counts %}
+            {% set b_t = compare.b.agg.type_counts %}
+            {% set ns4 = namespace(items=[]) %}
+            {% for k, v in dt.items() %}
+              {% set _ = ns4.items.append({"k": k, "v": v, "abs": (v if v>=0 else -v)}) %}
+            {% endfor %}
+            {% set ns5 = namespace(sorted=ns4.items|sort(attribute="abs", reverse=true)) %}
+
+            {% for it in ns5.sorted %}
+              {% set k = it.k %}
+              {% set v = it.v %}
+              <tr>
+                <td>{{ k }}</td>
+                <td style="text-align:right;">{{ a_t.get(k, 0) }}</td>
+                <td style="text-align:right;">{{ b_t.get(k, 0) }}</td>
+                <td style="text-align:right; color:{% if v>0 %}#166534{% elif v<0 %}#991b1b{% else %}#111{% endif %};">
+                  {% if v>0 %}+{% endif %}{{ v }}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+<section class="card">
+  <h3>Sample reviews</h3>
+  <p class="small">
+    Sample untuk eksplorasi cepat (maks 200 record pertama dari hasil load). Gunakan search box di bawah.
+  </p>
+
+  <div style="margin-bottom:8px;display:flex;gap:8px;align-items:center;">
+    <input
+      type="text"
+      id="sampleSearch"
+      placeholder="Cari di text / aspects / type..."
+      style="flex:1; padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--surface); color:var(--text); font-size:13px;"
+    >
+    <span class="small" id="sampleCountLabel"></span>
+  </div>
+
+  <div class="table-wrapper">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width:40px;">#</th>
+          <th style="width:110px;">Created</th>
+          <th>Text</th>
+          <th style="width:200px;">Aspects</th>
+          <th style="width:150px;">Type</th>
+          <th style="width:90px;">Conf</th>
+        </tr>
+      </thead>
+      <tbody id="sampleTableBody">
+        {% for r in sample_records %}
+        <tr
+          data-text='{{ (r.text or r.text_normalized or "") | tojson }}'
+          data-aspects='{{ (r.model_pred_aspects or r.nli_aspects or r.aspects or []) | join(" ") | tojson }}'
+          data-type='{{ (r.model_pred_comment_type or r.nli_comment_type or r.comment_type or "") | tojson }}'
+        >
+          <td>{{ loop.index }}</td>
+          <td>{{ (r.created_at or r.created_date or "")[:10] }}</td>
+          <td>{{ r.text or r.text_normalized }}</td>
+          <td>
+            {% set asp = (r.model_pred_aspects or r.nli_aspects or r.aspects or []) %}
+            {% if asp %}
+              {% for a in asp %}
+                <span class="tag">{{ a }}</span>
+              {% endfor %}
+            {% else %}
+              <span class="small">–</span>
+            {% endif %}
+          </td>
+          <td>{{ r.model_pred_comment_type or r.nli_comment_type or r.comment_type or "-" }}</td>
+          <td>
+            {% if r.model_confidence and r.model_confidence.overall is not none %}
+              {{ (r.model_confidence.overall|string)|replace("overall=","") }}
+            {% else %}
+              -
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://unpkg.com/d3-cloud/build/d3.layout.cloud.js"></script>
+
+<script>
+  // ---------- Data for charts ----------
+  const typeLabels = {{ agg.type_counts.keys() | list | tojson }};
+  const typeValues = {{ agg.type_counts.values() | list | tojson }};
+
+  const aspectLabels = {{ agg.aspect_counts.keys() | list | tojson }};
+  const aspectValues = {{ agg.aspect_counts.values() | list | tojson }};
+
+  const dateLabels = {{ agg.date_counts.keys() | list | tojson }};
+  const dateValues = {{ agg.date_counts.values() | list | tojson }};
+
+  // ---------- Additional analytics (computed client-side from aggregates) ----------
+  const heatmap = {{ (agg.heatmap or {}) | tojson }};
+
+  function _fmtInt(x) {
+    if (x === null || x === undefined || Number.isNaN(x)) return "-";
+    return new Intl.NumberFormat().format(Math.round(x));
+  }
+  function _fmtPct(x) {
+    if (x === null || x === undefined || Number.isNaN(x)) return "-";
+    const v = x * 100;
+    const sign = v > 0 ? "+" : "";
+    return `${sign}${v.toFixed(1)}%`;
+  }
+  function _dateKey(d) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+  function _parseDate(label) {
+    // label is typically YYYY-MM-DD
+    return new Date(label + "T00:00:00");
+  }
+
+  function buildDailySeries(labels, values) {
+    const map = new Map();
+    (labels || []).forEach((lbl, i) => {
+      const v = Number(values?.[i] ?? 0);
+      map.set(lbl, (map.get(lbl) || 0) + v);
+    });
+    const keys = Array.from(map.keys()).sort();
+    if (!keys.length) return { days: [], counts: [] };
+
+    const minD = _parseDate(keys[0]);
+    const maxD = _parseDate(keys[keys.length - 1]);
+    const days = [];
+    const counts = [];
+    for (let d = new Date(minD); d <= maxD; d.setDate(d.getDate() + 1)) {
+      const k = _dateKey(d);
+      days.push(k);
+      counts.push(map.get(k) || 0);
+    }
+    return { days, counts };
+  }
+
+  function sumLastWindow(seriesCounts, windowDays, endIdxInclusive) {
+    const start = Math.max(0, endIdxInclusive - windowDays + 1);
+    let s = 0;
+    for (let i = start; i <= endIdxInclusive; i++) s += (seriesCounts[i] || 0);
+    return s;
+  }
+
+  function normalizedEntropy(counts) {
+    const arr = (counts || []).map(Number).filter(v => v > 0);
+    const k = arr.length;
+    if (k <= 1) return 0;
+    const total = arr.reduce((a, b) => a + b, 0);
+    if (total <= 0) return 0;
+    let h = 0;
+    for (const c of arr) {
+      const p = c / total;
+      h -= p * Math.log(p);
+    }
+    return h / Math.log(k);
+  }
+
+  let _deltaChart = null;
+
+  function renderKpis(windowDays) {
+    const note = document.getElementById("growthNote");
+    const { days, counts } = buildDailySeries(dateLabels, dateValues);
+
+    if (!days.length) {
+      if (note) note.textContent = "No timeline data.";
+      return;
+    }
+
+    const lastIdx = counts.length - 1;
+    const lastDayCount = counts[lastIdx];
+    const lastDayLabel = days[lastIdx];
+
+    const winSum = sumLastWindow(counts, windowDays, lastIdx);
+    const prevEnd = lastIdx - windowDays;
+    const prevSum = prevEnd >= 0 ? sumLastWindow(counts, windowDays, prevEnd) : null;
+    const growth = (prevSum !== null && prevSum > 0) ? ((winSum - prevSum) / prevSum) : null;
+
+    const kLastDay = document.getElementById("kpiLastDay");
+    const kLastDayLabel = document.getElementById("kpiLastDayLabel");
+    const kWinSum = document.getElementById("kpiWinSum");
+    const kWinLabel = document.getElementById("kpiWinLabel");
+    const kPrevSum = document.getElementById("kpiPrevSum");
+    const kPrevLabel = document.getElementById("kpiPrevLabel");
+    const kGrowthPct = document.getElementById("kpiGrowthPct");
+    const kGrowthLabel = document.getElementById("kpiGrowthLabel");
+
+    if (kLastDay) kLastDay.textContent = _fmtInt(lastDayCount);
+    if (kLastDayLabel) kLastDayLabel.textContent = `Date: ${lastDayLabel}`;
+    if (kWinSum) kWinSum.textContent = _fmtInt(winSum);
+    if (kWinLabel) {
+      const startIdx = Math.max(0, lastIdx - windowDays + 1);
+      kWinLabel.textContent = `${days[startIdx]} → ${days[lastIdx]}`;
+    }
+    if (kPrevSum) kPrevSum.textContent = prevSum === null ? "-" : _fmtInt(prevSum);
+    if (kPrevLabel) {
+      if (prevSum === null) kPrevLabel.textContent = "Insufficient history.";
+      else {
+        const prevStart = Math.max(0, prevEnd - windowDays + 1);
+        kPrevLabel.textContent = `${days[prevStart]} → ${days[prevEnd]}`;
+      }
+    }
+    if (kGrowthPct) kGrowthPct.textContent = growth === null ? "-" : _fmtPct(growth);
+    if (kGrowthLabel) {
+      if (growth === null) kGrowthLabel.textContent = "Need previous window > 0.";
+      else kGrowthLabel.textContent = `Δ = ${_fmtInt(winSum - prevSum)} reviews`;
+    }
+
+    if (note) {
+      note.textContent = `Series: ${days[0]} → ${days[days.length - 1]} (${days.length} calendar days).`;
+    }
+
+    // Peak & volatility
+    const total = counts.reduce((a, b) => a + b, 0) || 0;
+    let peakIdx = 0;
+    for (let i = 1; i < counts.length; i++) if (counts[i] > counts[peakIdx]) peakIdx = i;
+
+    const peakDay = days[peakIdx];
+    const peakCount = counts[peakIdx];
+    const peakShare = total > 0 ? (peakCount / total) : null;
+
+    const deltas = [];
+    for (let i = 0; i < counts.length; i++) {
+      deltas.push(i === 0 ? 0 : (counts[i] - counts[i - 1]));
+    }
+
+    let bestIdx = 1, worstIdx = 1;
+    for (let i = 1; i < deltas.length; i++) {
+      if (deltas[i] > deltas[bestIdx]) bestIdx = i;
+      if (deltas[i] < deltas[worstIdx]) worstIdx = i;
+    }
+
+    const kPeakDay = document.getElementById("kpiPeakDay");
+    const kPeakCount = document.getElementById("kpiPeakCount");
+    const kPeakShare = document.getElementById("kpiPeakShare");
+    const kBestDelta = document.getElementById("kpiBestDelta");
+    const kWorstDelta = document.getElementById("kpiWorstDelta");
+
+    if (kPeakDay) kPeakDay.textContent = peakDay;
+    if (kPeakCount) kPeakCount.textContent = _fmtInt(peakCount);
+    if (kPeakShare) kPeakShare.textContent = peakShare === null ? "-" : _fmtPct(peakShare);
+    if (kBestDelta) kBestDelta.textContent = `${days[bestIdx]}: +${_fmtInt(deltas[bestIdx])}`;
+    if (kWorstDelta) kWorstDelta.textContent = `${days[worstIdx]}: ${_fmtInt(deltas[worstIdx])}`;
+
+    // Delta chart for the last 45 days (keeps it readable)
+    const lastN = Math.min(45, days.length);
+    const deltaDays = days.slice(days.length - lastN);
+    const deltaVals = deltas.slice(deltas.length - lastN);
+
+    const ctxDelta = document.getElementById("chartDelta")?.getContext("2d");
+    if (ctxDelta) {
+      if (_deltaChart) _deltaChart.destroy();
+      _deltaChart = new Chart(ctxDelta, {
+        type: "bar",
+        data: { labels: deltaDays, datasets: [{ label: "Δ reviews", data: deltaVals }] },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: false } },
+          scales: { y: { beginAtZero: false } }
+        }
+      });
+    }
+    const deltaHint = document.getElementById("deltaHint");
+    if (deltaHint) {
+      deltaHint.textContent = `Showing last ${lastN} days of day-over-day changes.`;
+    }
+
+    // Distribution quality KPIs
+    const totalAspect = (aspectValues || []).reduce((a, b) => a + Number(b || 0), 0);
+    const totalType = (typeValues || []).reduce((a, b) => a + Number(b || 0), 0);
+
+    let topAIdx = 0;
+    for (let i = 1; i < (aspectValues || []).length; i++) if ((aspectValues[i] || 0) > (aspectValues[topAIdx] || 0)) topAIdx = i;
+
+    let topTIdx = 0;
+    for (let i = 1; i < (typeValues || []).length; i++) if ((typeValues[i] || 0) > (typeValues[topTIdx] || 0)) topTIdx = i;
+
+    const topAspectShare = totalAspect > 0 ? (Number(aspectValues[topAIdx] || 0) / totalAspect) : null;
+    const topTypeShare = totalType > 0 ? (Number(typeValues[topTIdx] || 0) / totalType) : null;
+
+    const kTopAspectShare = document.getElementById("kpiTopAspectShare");
+    const kTopAspectLabel = document.getElementById("kpiTopAspectLabel");
+    const kAspectEntropy = document.getElementById("kpiAspectEntropy");
+
+    const kTopTypeShare = document.getElementById("kpiTopTypeShare");
+    const kTopTypeLabel = document.getElementById("kpiTopTypeLabel");
+    const kTypeEntropy = document.getElementById("kpiTypeEntropy");
+
+    if (kTopAspectShare) kTopAspectShare.textContent = topAspectShare === null ? "-" : _fmtPct(topAspectShare);
+    if (kTopAspectLabel) {
+      const lbl = aspectLabels?.[topAIdx] || "-";
+      kTopAspectLabel.textContent = `Top: ${lbl} (${_fmtInt(aspectValues?.[topAIdx] || 0)})`;
+    }
+    if (kAspectEntropy) kAspectEntropy.textContent = normalizedEntropy(aspectValues).toFixed(2);
+
+    if (kTopTypeShare) kTopTypeShare.textContent = topTypeShare === null ? "-" : _fmtPct(topTypeShare);
+    if (kTopTypeLabel) {
+      const lbl = typeLabels?.[topTIdx] || "-";
+      kTopTypeLabel.textContent = `Top: ${lbl} (${_fmtInt(typeValues?.[topTIdx] || 0)})`;
+    }
+    if (kTypeEntropy) kTypeEntropy.textContent = normalizedEntropy(typeValues).toFixed(2);
+
+    // Top combos from heatmap
+    const combos = [];
+    let comboTotal = 0;
+    if (heatmap) {
+      for (const [a, row] of Object.entries(heatmap)) {
+        if (!row) continue;
+        for (const [t, vRaw] of Object.entries(row)) {
+          const v = Number(vRaw || 0);
+          if (v <= 0) continue;
+          comboTotal += v;
+          combos.push({ aspect: a, type: t, count: v });
+        }
+      }
+    }
+    combos.sort((x, y) => y.count - x.count);
+
+    const body = document.getElementById("topCombosBody");
+    if (body) {
+      body.innerHTML = "";
+      const topK = combos.slice(0, 10);
+      for (const c of topK) {
+        const tr = document.createElement("tr");
+        const share = comboTotal > 0 ? (c.count / comboTotal) : null;
+        tr.innerHTML = `
+          <td>${c.aspect}</td>
+          <td>${c.type}</td>
+          <td style="text-align:right;">${_fmtInt(c.count)}</td>
+          <td style="text-align:right;">${share === null ? "-" : _fmtPct(share)}</td>
+        `;
+        body.appendChild(tr);
+      }
+      if (!topK.length) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="4" class="small">No combination data.</td>`;
+        body.appendChild(tr);
+      }
+    }
+    const comboHint = document.getElementById("comboHint");
+    if (comboHint) {
+      if (comboTotal > 0 && combos.length) {
+        const top = combos[0];
+        const share = top ? (top.count / comboTotal) : 0;
+        comboHint.textContent = `Total combos counted: ${_fmtInt(comboTotal)}. Top combo: ${top.aspect} × ${top.type} (${_fmtPct(share)}).`;
+      } else {
+        comboHint.textContent = "No heatmap data for current filters.";
+      }
+    }
+  }
+
+
+  // ---------- Charts ----------
+  const ctxTypes = document.getElementById('chartTypes')?.getContext('2d');
+  const ctxAspects = document.getElementById('chartAspects')?.getContext('2d');
+  const ctxTimeline = document.getElementById('chartTimeline')?.getContext('2d');
+
+  if (ctxTypes) {
+    new Chart(ctxTypes, {
+      type: 'doughnut',
+      data: { labels: typeLabels, datasets: [{ data: typeValues }] },
+      options: {
+        responsive: true,
+        plugins: { legend: { position: 'bottom' } }
+      }
+    });
+  }
+
+  if (ctxAspects) {
+    const pairs = aspectLabels.map((a, i) => ({ label: a, value: aspectValues[i] }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 20);
+
+    new Chart(ctxAspects, {
+      type: 'bar',
+      data: {
+        labels: pairs.map(p => p.label),
+        datasets: [{ label: 'Reviews', data: pairs.map(p => p.value) }]
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: { x: { beginAtZero: true } }
+      }
+    });
+  }
+
+  if (ctxTimeline) {
+    new Chart(ctxTimeline, {
+      type: 'line',
+      data: {
+        labels: dateLabels,
+        datasets: [{ label: 'Reviews/day', data: dateValues, tension: 0.25, fill: true }]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: { y: { beginAtZero: true } }
+      }
+    });
+  }
+
+
+  // ---------- Growth & distribution KPIs ----------
+  const _growthWindowEl = document.getElementById("growthWindow");
+  if (_growthWindowEl) {
+    const run = () => renderKpis(parseInt(_growthWindowEl.value || "7", 10));
+    _growthWindowEl.addEventListener("change", run);
+    run();
+  } else {
+    // Fallback when KPI section is not rendered (e.g., has_data=false)
+    renderKpis(7);
+  }
+
+  // ---------- Wordcloud (SVG vector) ----------
+  const wcTokens = {{ (agg.top_tokens or []) | tojson }};
+  const wcBigrams = {{ (agg.top_bigrams or []) | tojson }};
+  const wcTrigrams = {{ (agg.top_trigrams or []) | tojson }};
+
+  // Fallback (UI-only): if backend does not provide bigrams/trigrams, generate from visible sample rows.
+  // Uses the already-rendered sample table (no new API calls).
+  const _wcStop = new Set([
+    "yang","dan","di","ke","dari","untuk","dengan","atau","ini","itu","saya","kami","kamu","anda",
+    "nya","deh","dong","kok","sih","lah","pun","aja","jg","tdk","ga","gak","nggak","tidak",
+    "ada","jadi","pada","dalam","sudah","udah","belum","bisa","karena","seperti","lebih","paling"
+  ]);
+
+  function _wcNormalize(s) {
+    return (s || "")
+      .toLowerCase()
+      .replace(/[\u2018\u2019]/g, "'")
+      .replace(/[^a-z0-9\u00C0-\u024F\u1E00-\u1EFF\s]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function _wcTokenize(s) {
+    const norm = _wcNormalize(s);
+    if (!norm) return [];
+    return norm.split(" ").filter(t => t.length > 1 && !_wcStop.has(t));
+  }
+
+  function _wcVisibleTexts() {
+    // Used to avoid empty wordcloud when filters hide all sample rows.
+    window.__wcFallbackUsed = false;
+
+    const tbody = document.getElementById("sampleTableBody");
+    if (!tbody) return [];
+    const rows = Array.from(tbody.querySelectorAll("tr"));
+    const out = [];
+
+    for (const r of rows) {
+      if (r.style.display === "none") continue;
+      const t = r.getAttribute("data-text") || "";
+      if (t) out.push(t);
+    }
+
+    if (out.length === 0) {
+      window.__wcFallbackUsed = true;
+      for (const r of rows) {
+        const t = r.getAttribute("data-text") || "";
+        if (t) out.push(t);
+      }
+    }
+
+    return out;
+  }
+
+  function _wcBuildNgrams(n, topN = 180) {
+    const texts = _wcVisibleTexts();
+    const counts = new Map();
+    for (const txt of texts) {
+      const toks = _wcTokenize(txt);
+      if (toks.length < n) continue;
+      for (let i = 0; i <= toks.length - n; i++) {
+        const phrase = toks.slice(i, i + n).join(" ");
+        counts.set(phrase, (counts.get(phrase) || 0) + 1);
+      }
+    }
+    const arr = Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, topN)
+      .map(([word, count]) => ({ word, count }));
+    return arr;
+  }
+
+  function _wcBuildUnigrams(topN = 220) {
+    const texts = _wcVisibleTexts();
+    const counts = new Map();
+    for (const txt of texts) {
+      const toks = _wcTokenize(txt);
+      for (const t of toks) counts.set(t, (counts.get(t) || 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, topN)
+      .map(([word, count]) => ({ word, count }));
+  }
+
+  function renderWordcloudSVG(items, meta) {
+    const svg = d3.select("#wcSvg");
+    const hint = document.getElementById("wcHint");
+    if (svg.empty()) return;
+
+    const width = svg.node().clientWidth || 900;
+    const height = svg.node().clientHeight || 520;
+
+    svg.attr("viewBox", `0 0 ${width} ${height}`);
+
+    // Keep previous render while regenerating to avoid flicker.
+    let container = svg.select("g.wc-container");
+    if (container.empty()) {
+      container = svg.append("g").attr("class", "wc-container");
+    }
+
+    const oldRoot = container.select("g.wc-root");
+
+    // New root (hidden until draw completes)
+    const gRoot = container.append("g").attr("class", "wc-root").style("opacity", 0);
+
+    const zoom = d3.zoom()
+      .scaleExtent([0.5, 6])
+      .on("zoom", (event) => {
+        container.attr("transform", event.transform);
+      });
+
+    svg.call(zoom);
+
+    if (!items || !items.length) {
+      // Keep previous render if any.
+      if (hint) hint.textContent = "No wordcloud data for current filters.";
+      try {
+        // Remove the newly created empty root if present.
+        const _new = svg.select("g.wc-container").select("g.wc-root");
+        if (_new && !_new.empty()) _new.remove();
+      } catch (e) {}
+      return;
+    }
+
+    const genNote = meta && meta.generated ? " (generated client-side)" : "";
+    const fbNote = meta && meta.fallbackUsed ? " (fallback: no sample match, using all samples)" : "";
+    if (hint) hint.textContent = "Click a word to search in sample reviews." + genNote + fbNote;
+
+    const maxCount = d3.max(items, d => d.count) || 1;
+    const fontScale = d3.scaleLinear().domain([1, maxCount]).range([14, 86]);
+
+    const palette = (d3.schemeTableau10 && d3.schemeTableau10.length) ? d3.schemeTableau10 : d3.schemeCategory10;
+    const color = d3.scaleOrdinal(palette);
+
+    const words = items.slice(0, 140).map(d => {
+      const raw = (d.word || "").toString();
+      const isNgram = raw.includes(" ");
+      const display = isNgram ? raw.replace(/ /g, "\u00A0") : raw; // keep bigram/trigram intact
+      return {
+        text: display,
+        raw: raw,
+        size: fontScale(d.count),
+        count: d.count
+      };
+    });
+
+    const layout = d3.layout.cloud()
+      .size([width, height])
+      .words(words)
+      .padding(2)
+      .rotate(() => (Math.random() > 0.86 ? 90 : 0))
+      .font("Segoe UI")
+      .fontSize(d => d.size)
+      .on("end", draw);
+
+    layout.start();
+
+    function draw(w) {
+      const g = gRoot.append("g")
+        .attr("transform", `translate(${width/2}, ${height/2})`);
+
+      // Swap old content only after we have a new layout drawn.
+      try {
+        const _old = svg.select("g.wc-container").selectAll("g.wc-root").filter((d,i,nodes) => nodes[i] !== gRoot.node());
+        _old.remove();
+      } catch (e) {}
+      gRoot.style("opacity", 1);
+
+      g.selectAll("text")
+        .data(w)
+        .enter()
+        .append("text")
+        .style("font-family", "Segoe UI")
+        .style("font-size", d => d.size + "px")
+        .style("fill", d => color(d.raw || d.text))
+        .attr("text-anchor", "middle")
+        .attr("transform", d => `translate(${d.x},${d.y}) rotate(${d.rotate})`)
+        .text(d => d.text)
+        .style("cursor", "pointer")
+        .on("click", (event, d) => {
+          const input = document.getElementById("sampleSearch");
+          const tbody = document.getElementById("sampleTableBody");
+          if (!input || !tbody) return;
+
+          const prev = input.value || "";
+          input.value = (d.raw || d.text || "").toString();
+          input.dispatchEvent(new Event("input"));
+
+          // Guard: if filter matches nothing, revert to previous value to avoid empty views.
+          const rows = Array.from(tbody.querySelectorAll("tr"));
+          const visible = rows.reduce((acc, r) => acc + (r.style.display === "none" ? 0 : 1), 0);
+          if (visible === 0) {
+            input.value = prev;
+            input.dispatchEvent(new Event("input"));
+            if (hint) hint.textContent = "Filter from click produced no matches; keeping previous view.";
+          }
+        })
+        .append("title")
+        .text(d => `${d.raw || d.text} (${d.count})`);
+    }
+  }
+
+  const wcSource = document.getElementById("wcSource");
+  function rerenderWordcloud() {
+    const v = wcSource ? wcSource.value : "tokens";
+    let items = [];
+    let generated = false;
+
+    if (v === "bigrams") {
+      items = (Array.isArray(wcBigrams) && wcBigrams.length) ? wcBigrams : _wcBuildNgrams(2);
+      generated = !(Array.isArray(wcBigrams) && wcBigrams.length);
+    } else if (v === "trigrams") {
+      items = (Array.isArray(wcTrigrams) && wcTrigrams.length) ? wcTrigrams : _wcBuildNgrams(3);
+      generated = !(Array.isArray(wcTrigrams) && wcTrigrams.length);
+    } else {
+      items = (Array.isArray(wcTokens) && wcTokens.length) ? wcTokens : _wcBuildUnigrams();
+      generated = !(Array.isArray(wcTokens) && wcTokens.length);
+    }
+
+    const fallbackUsed = !!window.__wcFallbackUsed;
+    window.__wcFallbackUsed = false;
+    renderWordcloudSVG(items, { source: v, generated, fallbackUsed });
+  }
+
+  if (wcSource) {
+    wcSource.addEventListener("change", rerenderWordcloud);
+  }
+  rerenderWordcloud();
+
+const btnDl = document.getElementById("btnDownloadWcSvg");
+  if (btnDl) {
+    btnDl.addEventListener("click", () => {
+      const svgEl = document.getElementById("wcSvg");
+      if (!svgEl) return;
+      const serializer = new XMLSerializer();
+      const src = serializer.serializeToString(svgEl);
+      const blob = new Blob([src], { type: "image/svg+xml;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "wordcloud.svg";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    });
+  }
+
+  // ---------- Sample table: live search ----------
+  const sampleTableBody = document.getElementById("sampleTableBody");
+  const sampleSearchInput = document.getElementById("sampleSearch");
+  const sampleCountLabel = document.getElementById("sampleCountLabel");
+
+  function updateSampleCountLabel() {
+    if (!sampleTableBody || !sampleCountLabel) return;
+    const rows = sampleTableBody.querySelectorAll("tr");
+    let visible = 0;
+    rows.forEach(r => { if (r.style.display !== "none") visible += 1; });
+    sampleCountLabel.textContent = visible + " of " + rows.length + " shown";
+  }
+
+  if (sampleSearchInput && sampleTableBody) {
+    sampleSearchInput.addEventListener("input", function () {
+      const q = sampleSearchInput.value.trim().toLowerCase();
+      const rows = sampleTableBody.querySelectorAll("tr");
+      rows.forEach(r => {
+        const text = (r.getAttribute("data-text") || "").toLowerCase();
+        const aspects = (r.getAttribute("data-aspects") || "").toLowerCase();
+        const type = (r.getAttribute("data-type") || "").toLowerCase();
+        const hay = text + " " + aspects + " " + type;
+        r.style.display = (!q || hay.includes(q)) ? "" : "none";
+      });
+      // Update wordcloud when filtering samples if n-grams are being generated client-side.
+      const _wcSel = document.getElementById("wcSource");
+      if (_wcSel && (_wcSel.value === "bigrams" || _wcSel.value === "trigrams")) {
+        if (typeof rerenderWordcloud === "function") rerenderWordcloud();
+      }
+      updateSampleCountLabel();
+    });
+    updateSampleCountLabel();
+  }
+</script>
+
+{% endif %}
+{% endblock %}

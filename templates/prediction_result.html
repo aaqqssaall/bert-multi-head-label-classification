@@ -1,0 +1,79 @@
+{% extends "layout.html" %}
+{% block content %}
+
+<section class="card">
+  <h2>Prediction Result</h2>
+
+  {% if error %}
+    <p style="color:#b91c1c;">{{ error }}</p>
+  {% else %}
+    <p><strong>Total predicted reviews:</strong> {{ total }}</p>
+    {% if pred_path %}
+      <p><strong>Saved to file:</strong> <code>{{ pred_path }}</code></p>
+    {% endif %}
+  {% endif %}
+</section>
+
+{% if agg %}
+<section class="card">
+  <h3>Aggregated Summary</h3>
+  <div class="summary-grid">
+    <div>
+      <h4>Comment type distribution</h4>
+      <ul>
+        {% for t, c in agg.type_counts.items() %}
+          <li><strong>{{ t }}</strong>: {{ c }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    <div>
+      <h4>Aspect distribution</h4>
+      <ul>
+        {% for a, c in agg.aspect_counts.items() %}
+          <li><strong>{{ a }}</strong>: {{ c }}</strong></li>
+        {% endfor %}
+      </ul>
+    </div>
+    <div>
+      <h4>Reviews per date</h4>
+      <ul>
+        {% for d, c in agg.date_counts.items() %}
+          <li><strong>{{ d }}</strong>: {{ c }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+{% if records %}
+<section class="card">
+  <h3>Sample records (max 100)</h3>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Text</th>
+        <th>Predicted aspects</th>
+        <th>Predicted type</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in records %}
+      <tr>
+        <td>{{ loop.index }}</td>
+        <td>{{ r.text }}</td>
+        <td>
+          {% for a in r.model_pred_aspects %}
+            <span class="tag">{{ a }}</span>
+          {% endfor %}
+        </td>
+        <td>{{ r.model_pred_comment_type }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+{% endblock %}

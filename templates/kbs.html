@@ -1,0 +1,178 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="card">
+  <h2>Hybrid KBS</h2>
+  <p class="small">
+    This page adds a business-rule layer on top of existing prediction JSONL (no retraining, no overwrite).
+  </p>
+
+  {% if not has_data %}
+    <p class="job-error">No prediction runs found in <code>data/predictions</code>. Run Prediction first.</p>
+  {% else %}
+    <form method="get" action="/kbs" class="filter-bar">
+      <div class="filter-group">
+        <label class="filter-label">Run
+          <select name="run">
+            <option value="latest" {% if selected_run == "latest" %}selected{% endif %}>latest</option>
+            {% for r in runs %}
+              <option value="{{ r.id }}" {% if selected_run == r.id %}selected{% endif %}>{{ r.id }}</option>
+            {% endfor %}
+          </select>
+        </label>
+
+        <label class="filter-label">Min conf
+          <input type="number" step="0.01" min="0" max="1" name="min_conf" value="{{ filter_min_conf }}">
+        </label>
+
+        <label class="filter-label">Priority
+          <select name="priority">
+            <option value="" {% if not filter_priority %}selected{% endif %}>all</option>
+            {% for p in available_priorities %}
+              <option value="{{ p }}" {% if filter_priority == p %}selected{% endif %}>{{ p }}</option>
+            {% endfor %}
+          </select>
+        </label>
+
+        <label class="filter-label">Owner
+          <select name="owner_team">
+            <option value="" {% if not filter_owner_team %}selected{% endif %}>all</option>
+            {% for o in available_owners %}
+              <option value="{{ o }}" {% if filter_owner_team == o %}selected{% endif %}>{{ o }}</option>
+            {% endfor %}
+          </select>
+        </label>
+
+        <label class="filter-label">Tag
+          <select name="tag">
+            <option value="" {% if not filter_tag %}selected{% endif %}>all</option>
+            {% for t in available_tags %}
+              <option value="{{ t }}" {% if filter_tag == t %}selected{% endif %}>{{ t }}</option>
+            {% endfor %}
+          </select>
+        </label>
+
+        <label class="filter-label">Search
+          <input type="text" name="q" value="{{ filter_q }}" placeholder="keyword...">
+        </label>
+      </div>
+
+      <button class="btn-primary btn-sm filter-apply-btn" type="submit">Apply</button>
+    </form>
+
+    <div class="summary-grid">
+      <div class="card kpi-card">
+        <div class="kpi-title">Records loaded</div>
+        <div class="kpi-value">{{ records_total }}</div>
+        <div class="kpi-sub">Run: {{ selected_run }}</div>
+      </div>
+      <div class="card kpi-card">
+        <div class="kpi-title">After filters</div>
+        <div class="kpi-value">{{ filtered_total }}</div>
+        <div class="kpi-sub">Priority/Owner/Tag/Conf/Search</div>
+      </div>
+      <div class="card kpi-card">
+        <div class="kpi-title">Top priority</div>
+        <div class="kpi-value">{{ (priority_counts.get("P0", 0) + priority_counts.get("P1", 0)) }}</div>
+        <div class="kpi-sub">P0 + P1</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Business signals</h3>
+
+      <div class="kbs-summary-grid">
+        <div class="kbs-panel">
+          <div class="kbs-panel-title">Priority distribution</div>
+          <div class="kbs-chip-row">
+            {% for p in ["P0","P1","P2","P3"] %}
+              <span class="chip chip-priority {{ p|lower }}">{{ p }}: {{ priority_counts.get(p, 0) }}</span>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div class="kbs-panel">
+          <div class="kbs-panel-title">Owner distribution</div>
+          <div class="kbs-chip-row">
+            {% for o, c in owner_counts.items() %}
+              <span class="chip chip-owner">{{ o }}: {{ c }}</span>
+            {% endfor %}
+            {% if owner_counts|length == 0 %}
+              <span class="small">No owner tags in filtered data.</span>
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="kbs-panel">
+          <div class="kbs-panel-title">Top tags</div>
+          <div class="kbs-chip-row">
+            {% for t, c in (tag_counts|dictsort(false, 'value'))[::-1][:14] %}
+              <span class="chip chip-tag">{{ t }}: {{ c }}</span>
+            {% endfor %}
+            {% if tag_counts|length == 0 %}
+              <span class="small">No tags in filtered data.</span>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Actionable queue (sample)</h3>
+      <p class="small">Sorted by priority, then confidence. Showing up to 200 rows.</p>
+
+      <div class="table-wrapper">
+        <table class="data-table kbs-table">
+          <thead>
+            <tr>
+              <th style="width:80px;">Priority</th>
+              <th style="width:130px;">Owner</th>
+              <th style="width:140px;">Tags</th>
+              <th>Recommended action</th>
+              <th style="width:110px;">Confidence</th>
+              <th style="width:110px;">Agreement</th>
+              <th style="width:360px;">Text</th>
+              <th style="width:220px;">Rule trace</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in sample_records %}
+              {% set kb = r.get("kbs") %}
+              {% set mc = r.get("model_confidence") or {} %}
+              <tr>
+                <td>
+                  <span class="pill pill-priority {{ (kb.get('priority') or 'P3')|lower }}">{{ kb.get("priority") }}</span>
+                </td>
+                <td>{{ kb.get("owner_team") }}</td>
+                <td>
+                  {% for t in kb.get("business_tags") or [] %}
+                    <span class="pill pill-tag">{{ t }}</span>
+                  {% endfor %}
+                </td>
+                <td class="small">{{ kb.get("recommended_action") }}</td>
+                <td class="small">{% set ov = mc.get("overall") %}{{ "%.3f"|format(ov) if ov is not none else "-" }}</td>
+                <td class="small">
+                  {% if r.get("agreement") %}
+                    <span class="tag-agree tag-{{ r.get('agreement').get('overall','unknown') }}">{{ r.get("agreement").get("overall") }}</span>
+                  {% else %}
+                    <span class="tag-agree tag-unknown">unknown</span>
+                  {% endif %}
+                </td>
+                <td>
+                  <div class="review-text kbs-review">{{ (r.get("text") or r.get("text_normalized") or "") }}</div>
+                </td>
+                <td>
+                  {% set traces = kb.get("rule_trace") or [] %}<div class="kbs-trace">{% if traces|length == 0 %}<div class="small">–</div>{% else %}{% for tr in traces %}<div class="kbs-trace-item"><div class="kbs-trace-id">{{ tr.get("rule_id") }}</div><div class="kbs-trace-explain small">{{ tr.get("explain") }}</div>{% if tr.get("matched") %}<div class="kbs-trace-matched small">Matched: <code>{{ tr.get("matched") }}</code></div>{% endif %}</div>{% endfor %}{% endif %}</div>
+                </td>
+              </tr>
+            {% endfor %}
+            {% if sample_records|length == 0 %}
+              <tr><td colspan="8" class="small">No rows match current filters.</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  {% endif %}
+</div>
+{% endblock %}
